@@ -1,0 +1,9 @@
+[general]
+bars =16
+framerate = 60
+
+[output]
+method = raw
+raw_target = /dev/stdout
+data_format = ascii
+bit_format = 8
