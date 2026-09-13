@@ -1,0 +1,2 @@
+#!/bin/bash
+exec ffplay -v 0 -nostats -nodisp -autoexit -i pipe:0 "$@"

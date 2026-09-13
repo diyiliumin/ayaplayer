@@ -1,0 +1,10 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+cd $SCRIPT_DIR/bili_select_song_tui/cmd/tui/
+
+ln -sf "$SCRIPT_DIR/buildtree_web/build_web.sh" ./build
+ln -sf "$SCRIPT_DIR/buildtree_web/results.json" ./tree.json
+
+./tui

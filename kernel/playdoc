@@ -1,0 +1,133 @@
+#!/bin/bash
+set -e
+
+# ===== 诊断：捕获退出并报告 =====
+trap 'echo "[FATAL] 脚本在 line $LINENO 退出，最后命令: $BASH_COMMAND" >&2' EXIT
+
+if [[ $# -ne 1 ]]; then
+    echo "用法: $0 <CID>" >&2
+    exit 1
+fi
+CID="$1"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TREE_JSON="$SCRIPT_DIR/buildtree/tree.json"
+
+if [[ ! -f "$TREE_JSON" ]]; then
+    echo "错误: 找不到 tree.json 文件！" >&2
+    exit 1
+fi
+
+TAB_NAME=$(python3 -c "
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+for item in data:
+    for title in item.get('titles', []):
+        for tab in title.get('tabs', []):
+            for it in tab.get('items', []):
+                if str(it.get('cid')) == sys.argv[2]:
+                    tab_name = tab.get('name', '')
+                    title_name = title.get('name', '')
+
+                    if tab_name == title_name:
+                        print(f\"{tab_name}\")
+                    else:
+                        print(f\"{title_name}:{tab_name}\")
+                    exit()
+
+print('未知曲目')
+" "$TREE_JSON" "$CID")
+
+clear
+echo "正在加载音频流..."
+echo ""
+
+ROOT=$($SCRIPT_DIR/01_read_config.py)
+
+AUDIO_FILE=""
+while IFS= read -r -d '' f; do
+    TYPE=$(printf '%s' "$f" | $SCRIPT_DIR/03_detect_av.py)
+    [[ $TYPE == Video ]] && continue
+    AUDIO_FILE="$f"
+    break
+done < <(find "$ROOT/$CID" -name '*-*.m4s' -print0)
+
+if [[ -z "$AUDIO_FILE" ]]; then
+    echo "未找到音频文件" >&2
+    exit 1
+fi
+
+echo -e -n "▶正在播放 $TAB_NAME q退出  p暂停/播放  x跳过此曲"
+
+if timeout 1 ping -c 1 -W 1 8.8.8.8 &>/dev/null; then
+    IFS=: read -r part1 part2 <<< "$TAB_NAME"
+fi
+
+# ===== 关键诊断点 1 =====
+echo "[DEBUG] 行 $LINENO: 启动 fakehex2cava" >&2
+"$SCRIPT_DIR/fakehex2cava.py" "$TAB_NAME" &
+FAKE_PID=$!
+echo "[DEBUG] fake PID: $FAKE_PID" >&2
+
+# ===== 关键诊断点 2 =====
+echo "[DEBUG] 行 $LINENO: 启动 ffplay" >&2
+tail -c +10 "$AUDIO_FILE" | ffplay -v 0 -nostats -nodisp -autoexit -af "volume=0.3" - 2>/dev/null &
+FFPLAY_PID=$!
+echo "[DEBUG] ffplay PID: $FFPLAY_PID" >&2
+
+sleep 0.1
+
+# ===== 关键诊断点 3 =====
+echo "[DEBUG] 行 $LINENO: 检查 ffplay 状态" >&2
+kill -0 "$FFPLAY_PID" 2>/dev/null && echo "[DEBUG] ffplay 活着" >&2 || echo "[DEBUG] ffplay 死了/错误" >&2
+
+# ===== 关键诊断点 4：进入循环前 =====
+echo "[DEBUG] 行 $LINENO: 准备进入 while 循环" >&2
+
+PAUSED=false
+echo -e -n "\n▶ 正在播放: $TAB_NAME\n按 p 暂停/继续，按 x 退出..."
+
+# ===== 关键：这里可能直接退出 =====
+echo "[DEBUG] 行 $LINENO: while 开始" >&2
+
+while kill -0 "$FFPLAY_PID" 2>/dev/null; do
+    echo "[DEBUG] 循环内，LINENO: $LINENO" >&2
+    
+    if read -s -n1 -t 0.1 key; then
+        echo "[DEBUG] 读到 key='$key'" >&2
+        case "$key" in
+            'p'|'P')
+                if [ "$PAUSED" = false ]; then
+                    kill -STOP "$FFPLAY_PID" 2>/dev/null
+                    kill -STOP "$FAKE_PID"   2>/dev/null
+                    PAUSED=true
+                    echo -e -n "\n已暂停，按 p 继续..."
+                else
+                    kill -CONT "$FFPLAY_PID" 2>/dev/null
+                    kill -CONT "$FAKE_PID"   2>/dev/null
+                    PAUSED=false
+                    echo -e "\n继续播放: $TAB_NAME"
+                fi
+                ;;
+            'x'|'X')
+                echo -e "\n用户主动退出"
+                kill "$FFPLAY_PID" 2>/dev/null
+                kill "$FAKE_PID"  2>/dev/null
+                break
+                ;;
+        esac
+    else
+        # ===== 这里！read 失败返回非零，set -e 可能触发退出 =====
+        echo "[DEBUG] read 失败或超时，但继续循环" >&2
+    fi
+done
+
+echo "[DEBUG] 循环结束，LINENO: $LINENO" >&2
+
+kill "$FAKE_PID" 2>/dev/null || true
+wait "$FAKE_PID" 2>/dev/null || true
+wait "$FFPLAY_PID" 2>/dev/null || true
+
+exit 0

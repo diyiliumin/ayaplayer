@@ -1,0 +1,82 @@
+# ===== 编译产物 =====
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+tui
+bili_select_song_tui/cmd/tui/tui
+song_adders/shared/bili_select_song_tui/cmd/tui/tui
+song_adders/*/bin/tui
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+package-lock.json
+
+# ===== 运行时数据 =====
+# 数据源
+playlist.json
+playlist.jsonl
+playlist.json.bak.*
+playlist.txt
+*.bak
+*.bak.*
+
+# tree.json（生成的）
+tree.json
+results.json
+song_adders/*/bin/tree.json
+song_adders/*/bin/build
+
+# 缓存
+cache/
+song_adders/*/buildtree*/cache/
+.tmp/
+/tmp/
+
+# 日志
+*.log
+logs/
+
+# ===== 软链 =====
+# song_adders/*/bili_select_song_tui
+# song_adders/*/bin/*
+
+# ===== 配置 =====
+# 但保留配置模板
+# config.json
+# !config.json.example
+# *.secret
+# .env
+# .env.local
+
+# ===== 系统 =====
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.iml
+
+# ===== 构建 =====
+build/
+dist/
+target/
+song_adders/*/buildtree*/
+!song_adders/*/buildtree*/build.sh
+!song_adders/*/buildtree*/*.py
+!song_adders/*/buildtree*/*.go
+!song_adders/*/buildtree*/*.rs

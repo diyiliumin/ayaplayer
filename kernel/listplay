@@ -1,0 +1,359 @@
+#!/bin/bash
+# set -e
+
+DEVICE="/dev/nvme0n1p3"
+MOUNT_POINT="/mnt/windows"
+
+# ★★★ 检查是否已经挂载 ★★★
+if mount | grep -q "$MOUNT_POINT"; then
+    echo "✅ $MOUNT_POINT 已经挂载"
+elif mount | grep -q "$DEVICE"; then
+    echo "✅ $DEVICE 已经挂载到其他位置"
+else
+    echo "📂 正在挂载 $DEVICE 到 $MOUNT_POINT ..."
+    sudo mount "$DEVICE" "$MOUNT_POINT"
+    echo "✅ 挂载完成"
+fi
+
+# ===== 配置 =====
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLAYLIST_FILE="$SCRIPT_DIR/playlist.txt"
+TREE_JSON="$SCRIPT_DIR/buildtree/tree.json"
+ROOT=$($SCRIPT_DIR/01_read_config.py)
+
+# ===== 颜色定义 =====
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m' # No Color
+
+# ===== 函数：获取歌曲信息 =====
+get_song_info() {
+    local cid="$1"
+    python3 -c "
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+cid_str = sys.argv[2]
+for item in data:
+    for title in item.get('titles', []):
+        for tab in title.get('tabs', []):
+            for it in tab.get('items', []):
+                if str(it.get('cid')) == cid_str:
+                    group_name = item.get('name', '')
+                    title_name = title.get('name', '')
+                    tab_name = tab.get('name', '')
+                    print(f'{group_name}|{title_name}|{tab_name}')
+                    exit()
+print('||')
+" "$TREE_JSON" "$cid"
+}
+
+# ===== 函数：获取音频文件路径 =====
+get_audio_file() {
+    local cid="$1"
+    local audio_file=""
+    while IFS= read -r -d '' f; do
+        TYPE=$(printf '%s' "$f" | $SCRIPT_DIR/03_detect_av.py)
+        [[ $TYPE == Video ]] && continue
+        audio_file="$f"
+        break
+    done < <(find "$ROOT/$cid" -name '*-*.m4s' -print0 2>/dev/null)
+    echo "$audio_file"
+}
+
+get_image_file() {
+    local cid="$1"
+    local image_file=""
+    
+    # 优先查找 image.jpg（你目录里有）
+    while IFS= read -r -d '' f; do
+        if [[ "$(basename "$f")" == "image.jpg" ]]; then
+            image_file="$f"
+            break
+        fi
+    done < <(find "$ROOT/$cid" -maxdepth 1 -name 'image.jpg' -print0 2>/dev/null)
+    
+    # 如果没有 image.jpg，找 group.jpg
+    if [[ -z "$image_file" ]]; then
+        while IFS= read -r -d '' f; do
+            if [[ "$(basename "$f")" == "group.jpg" ]]; then
+                image_file="$f"
+                break
+            fi
+        done < <(find "$ROOT/$cid" -maxdepth 1 -name 'group.jpg' -print0 2>/dev/null)
+    fi
+    
+    # 如果都没有，找任意 jpg/png
+    if [[ -z "$image_file" ]]; then
+        while IFS= read -r -d '' f; do
+            image_file="$f"
+            break
+        done < <(find "$ROOT/$cid" -maxdepth 1 -type f \( -name '*.jpg' -o -name '*.jpeg' -o -name '*.png' \) -print0 2>/dev/null)
+    fi
+    
+    echo "$image_file"
+}
+
+# ===== 函数：播放单首歌曲 =====
+
+# ===== 函数：删除播放列表第一行 =====
+delete_first_line() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
+        # 删除第一行
+        tail -n +2 "$file" > "$file.tmp"
+        mv "$file.tmp" "$file"
+    fi
+}
+
+# ===== 函数：显示播放列表 =====
+show_playlist() {
+    local file="$1"
+    if [[ ! -f "$file" ]]; then
+        echo -e "${RED}✗ 播放列表不存在${NC}"
+        return
+    fi
+    
+    local count=$(wc -l < "$file" 2>/dev/null || echo 0)
+    # echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    # echo -e "${GREEN}📋 播放列表 (共 $count 首)${NC}"
+    # echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    local line_num=0
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+        # 解析行: CID | Group | Category | Title
+        IFS='|' read -r cid group category title <<< "$line"
+        # 清理空格
+        cid=$(echo "$cid" | xargs)
+        title=$(echo "$title" | xargs)
+        if [[ $line_num -eq 1 ]]; then
+            echo -e "${YELLOW}▶ ${line_num}.${NC} $title ${BLUE}[$cid]${NC} ${GREEN}← 当前${NC}"
+        else
+            echo -e "  ${line_num}. $title ${BLUE}[$cid]${NC}"
+        fi
+    done < "$file"
+    # echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+}
+
+# ===== 函数：读取并删除第一行 =====
+pop_first_line() {
+    local file="$1"
+    local first_line=""
+    
+    if [[ ! -f "$file" ]] || [[ ! -s "$file" ]]; then
+        echo ""
+        return 1
+    fi
+    
+    # 读取第一行
+    first_line=$(head -n 1 "$file")
+    
+    # 删除第一行
+    tail -n +2 "$file" > "$file.tmp"
+    mv "$file.tmp" "$file"
+    
+    echo "$first_line"
+    return 0
+}
+
+# ===== 函数：把行写回文件顶部 =====
+push_back_first_line() {
+    local file="$1"
+    local line="$2"
+    
+    if [[ -z "$line" ]]; then
+        return
+    fi
+    
+    # 把行插入到文件顶部
+    echo "$line" | cat - "$file" > "$file.tmp"
+    mv "$file.tmp" "$file"
+}
+
+#!/bin/bash
+
+# ===== 主循环 =====
+main() {
+    # 检查必要文件
+    if [[ ! -f "$TREE_JSON" ]]; then
+        echo -e "${RED}✗ 错误: 找不到 tree.json 文件！${NC}" >&2
+        exit 1
+    fi
+    
+    # echo -e "${GREEN}🎵 播放列表播放器${NC}"
+    # echo -e "${BLUE}按 1-9 设置播放次数 (当前: 1次)${NC}"
+    # echo -e "${BLUE}按 p 暂停/继续 | x 跳过此曲 | q 退出${NC}"
+    # echo ""
+    
+    # 播放次数默认 1
+    REPEAT_COUNT=0
+    SONG_LOOP=1
+    # 主循环
+    while true; do
+        # 检查播放列表是否存在且有内容
+        if [[ ! -f "$PLAYLIST_FILE" ]] || [[ ! -s "$PLAYLIST_FILE" ]]; then
+            echo -e -n "\r${YELLOW}⏳ 等待播放列表添加歌曲...${NC}"
+	    sleep 5
+	    continue 
+        fi
+        
+        # 显示播放列表
+        # show_playlist "$PLAYLIST_FILE"
+        
+        # 读取第一行
+        FIRST_LINE=$(head -n 1 "$PLAYLIST_FILE")
+	current_song=$(pop_first_line "$PLAYLIST_FILE")
+        # delete_first_line "$PLAYLIST_FILE"
+        if [[ -z "$FIRST_LINE" ]]; then
+            # echo -e -n "\r${YELLOW}⏳ 播放列表为空，等待新的歌曲...${NC}"
+            # 删除空文件
+            # rm -f "$PLAYLIST_FILE"
+            continue
+        fi
+        
+        # 解析第一行: CID | Group | Category | Title
+	IFS='|' read -r cid group category title <<< "$FIRST_LINE"
+	cid=$(echo "$cid" | xargs)
+	group=$(echo "$group" | xargs)
+	category=$(echo "$category" | xargs)
+	title=$(echo "$title" | xargs)
+
+
+	# ★★★ 生成显示名称 ★★★
+	display_name=""
+	if [[ "$category" == "$title" ]]; then
+		# 如果相同，只显示一个
+		display_name="$title"
+	else
+		# 如果不同，组合显示
+		if [[ -n "$category" ]] && [[ -n "$title" ]]; then
+			display_name="$category - $title"
+		elif [[ -n "$category" ]]; then
+			display_name="$category"
+		elif [[ -n "$title" ]]; then
+			display_name="$title"
+		else
+			display_name="未知曲目"
+		fi
+	fi
+
+
+        if [[ -z "$cid" ]]; then
+            echo -e "${RED}✗ 无效的播放列表格式，跳过此行${NC}"
+            delete_first_line "$PLAYLIST_FILE"
+            continue
+        fi
+        
+        # 获取歌曲信息
+        echo -e "${CYAN}🎵 准备播放: ${YELLOW}$title${NC}"
+        echo -e "${BLUE}   CID: $cid${NC}"
+        echo -e "${BLUE}   播放次数: $REPEAT_COUNT${NC}"
+        echo ""
+        
+        # 获取音频文件
+        audio_file=$(get_audio_file "$cid")
+        if [[ -z "$audio_file" ]]; then
+            echo -e "${RED}✗ 未找到音频文件 (CID: $cid)，跳过${NC}"
+            delete_first_line "$PLAYLIST_FILE"
+            continue
+        fi
+        
+        # 播放歌曲（用户可以在播放过程中按 1-9 改变次数）
+        echo -e "${GREEN}▶ 开始播放...${NC}"
+        echo -e -n "\n${BLUE}按 1-9 改变播放次数 | p 暂停 | x 跳过 | q 退出${NC}"
+        
+        # 启动播放（带键盘监听）
+        PAUSED=false
+	echo $(get_image_file "$cid")
+	"$SCRIPT_DIR/fakehexwithascii.py" "$display_name" "$cid" "$(get_image_file "$cid")"&
+	FAKE_PID=$!
+
+	if [[ -p /tmp/player_control.pipe ]]; then
+		echo "$REPEAT_COUNT" > /tmp/player_control.pipe 2>/dev/null || true
+	fi
+
+        tail -c +10 "$audio_file" | ffplay -v 0 -nostats -nodisp -autoexit - 2>/dev/null &
+        FFPLAY_PID=$!
+        
+        # 监听键盘输入
+        while kill -0 "$FFPLAY_PID" 2>/dev/null; do
+            if read -s -n1 -t 0.1 key 2>/dev/null; then
+	        case "$key" in
+		        '1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9')
+			    # ★★★ 正确的算术运算 ★★★
+			    SONG_LOOP=$((key))
+			    REPEAT_COUNT=$((SONG_LOOP- 1))
+			    # ★★★ 写入管道（检查是否成功）★★★
+			    if echo "$REPEAT_COUNT" > /tmp/player_control.pipe 2>/dev/null; then
+				    echo "✅ 已发送到管道"
+			    else
+				    echo "⚠️ 管道写入失败"
+			    fi
+			    ;;
+                    'p'|'P')
+                        if [ "$PAUSED" = false ]; then
+                            kill -STOP "$FFPLAY_PID" 2>/dev/null
+                            kill -STOP "$FAKE_PID" 2>/dev/null
+                            PAUSED=true
+                            echo -e "\n⏸ 已暂停，按 p 继续..."
+                        else
+                            kill -CONT "$FFPLAY_PID" 2>/dev/null
+                            kill -CONT "$FAKE_PID" 2>/dev/null
+                            PAUSED=false
+                            echo -e "\n▶ 继续播放"
+                        fi
+                        ;;
+                    'x'|'X')
+                        echo -e "\n⏹ 跳过此曲"
+                        kill "$FFPLAY_PID" 2>/dev/null
+                        kill "$FAKE_PID" 2>/dev/null
+			if [[ $REPEAT_COUNT -gt 0 ]]; then
+		        	((REPEAT_COUNT = REPEAT_COUNT - 1))
+				push_back_first_line "$PLAYLIST_FILE" "$current_song"
+			else
+				((REPEAT_COUNT = SONG_LOOP-1))
+			fi
+                        # 删除当前播放的歌曲
+                        continue 2
+                        ;;
+                    'q'|'Q')
+			push_back_first_line "$PLAYLIST_FILE" "$current_song"
+                        kill "$FFPLAY_PID" 2>/dev/null
+                        kill "$FAKE_PID" 2>/dev/null
+                        echo -e "\n👋 退出播放\n"
+                        exit 0
+                        ;;
+                esac
+            fi
+        done
+        
+        # 清理
+        kill "$FAKE_PID" 2>/dev/null || true
+        wait "$FAKE_PID" 2>/dev/null || true
+        wait "$FFPLAY_PID" 2>/dev/null || true
+        
+	# ★★★ 播放完成后，减少播放次数 ★★★
+	if [[ $REPEAT_COUNT -gt 0 ]]; then
+		((REPEAT_COUNT = REPEAT_COUNT - 1))
+		# 或者 ((REPEAT_COUNT--))
+		push_back_first_line "$PLAYLIST_FILE" "$current_song"
+	else
+		((REPEAT_COUNT = SONG_LOOP-1))
+	fi
+        
+        echo -e "\n${GREEN}✓ 完成: $title${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        
+        # 短暂延迟，然后播放下一首
+        sleep 0.5
+    done
+}
+
+# ===== 启动 =====
+main

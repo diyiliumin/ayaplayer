@@ -1,0 +1,6 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+$SCRIPT_DIR/../kernel/head &
+KERNEL_PID=$!
+$SCRIPT_DIR/../user_interfaces/default/bin/*

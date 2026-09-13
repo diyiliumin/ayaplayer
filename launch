@@ -1,0 +1,30 @@
+DEVICE="/dev/nvme0n1p3"
+MOUNT_POINT="/mnt/windows"
+
+# ★★★ 检查是否已经挂载 ★★★
+if mount | grep -q "$MOUNT_POINT"; then
+    echo "✅ $MOUNT_POINT 已经挂载"
+elif mount | grep -q "$DEVICE"; then
+    echo "✅ $DEVICE 已经挂载到其他位置"
+else
+    echo "📂 正在挂载 $DEVICE 到 $MOUNT_POINT ..."
+    sudo mount "$DEVICE" "$MOUNT_POINT"
+    echo "✅ 挂载完成"
+fi
+
+DEVICE="/dev/nvme0n1p4"
+MOUNT_POINT="/mnt/d"
+
+# ★★★ 检查是否已经挂载 ★★★
+if mount | grep -q "$MOUNT_POINT"; then
+    echo "✅ $MOUNT_POINT 已经挂载"
+elif mount | grep -q "$DEVICE"; then
+    echo "✅ $DEVICE 已经挂载到其他位置"
+else
+    echo "📂 正在挂载 $DEVICE 到 $MOUNT_POINT ..."
+    sudo mount "$DEVICE" "$MOUNT_POINT"
+    echo "✅ 挂载完成"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+$SCRIPT_DIR/distros/active

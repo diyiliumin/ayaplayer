@@ -1,0 +1,34 @@
+#!/bin/bash
+
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+PLAYLIST_FILE="${SCRIPT_DIR}/playlist.json"
+PLAYERS_DIR="${SCRIPT_DIR}/players/bin"
+
+# 读取第一行 JSON
+FIRST_LINE=$(head -n 1 "$PLAYLIST_FILE")
+SCHEME=$(echo "$FIRST_LINE" | jq -r '.scheme')
+
+echo $SCHEME
+
+# 查找支持该 scheme 的播放器
+for player in "$PLAYERS_DIR"/*; do
+    if [ -x "$player" ] && "$player" --support 2>/dev/null | grep -q "$SCHEME"; then
+        FOUND_PLAYER="$player"
+        break
+    fi
+done
+
+# 启动播放
+PLAY_PID=$("$FOUND_PLAYER" --play "$FIRST_LINE") 
+
+# 获取封面
+COVER_PATH=$("$FOUND_PLAYER" --cover "$FIRST_LINE")
+
+TITLE=$("$FOUND_PLAYER" --title "$FIRST_LINE")
+
+echo "播放器: $FOUND_PLAYER"
+echo "PID: $PLAY_PID"
+echo "封面: $COVER_PATH"
+echo "title: $TITLE"

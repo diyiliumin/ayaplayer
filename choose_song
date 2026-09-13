@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# ============================================
+# song_adders TUI - 自动扫描 + hjkl 选择
+# ============================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ============================================
+# 自动扫描数据源
+# ============================================
+scan_sources() {
+    local sources=()
+    
+    for dir in "$SCRIPT_DIR/song_adders"/*/; do
+        [ -d "$dir" ] || continue
+        
+        local name=$(basename "$dir")
+        
+        # 跳过隐藏目录和 shared
+        [[ "$name" == .* ]] && continue
+        [[ "$name" == "shared" ]] && continue
+        
+        # 必须有 run 脚本
+        [ -x "$dir/run" ] || continue
+        
+        sources+=("$name")
+    done
+    
+    printf '%s\n' "${sources[@]}"
+}
+
+# ============================================
+# 图标
+# ============================================
+get_icon() {
+    case "$1" in
+        *cache*)  echo "📦" ;;
+        *web*)    echo "🌐" ;;
+        *local*)  echo "📁" ;;
+        *steam*)  echo "🎮" ;;
+        *yt*)     echo "📺" ;;
+        *)        echo "📀" ;;
+    esac
+}
+
+# ============================================
+# 描述
+# ============================================
+get_desc() {
+    case "$1" in
+        *cache*)  echo "B站缓存" ;;
+        *web*)    echo "B站网页" ;;
+        *local*)  echo "本地文件" ;;
+        *steam*)  echo "Steam音乐" ;;
+        *yt*)     echo "YouTube" ;;
+        *)        echo "数据源" ;;
+    esac
+}
+
+# ============================================
+# 获取终端尺寸
+# ============================================
+get_size() {
+    local size=$(stty size 2>/dev/null)
+    ROWS=${size% *}
+    COLS=${size#* }
+    [ -z "$ROWS" ] && ROWS=24
+    [ -z "$COLS" ] && COLS=80
+}
+
+# ============================================
+# 主界面
+# ============================================
+main() {
+    local sources=($(scan_sources))
+    local total=${#sources[@]}
+    
+    if [ $total -eq 0 ]; then
+        echo -e "${RED}❌ 没有找到数据源${NC}"
+        echo -e "${DIM}   目录: $SCRIPT_DIR${NC}"
+        echo -e "${DIM}   需要: 子目录里有可执行的 run${NC}"
+        exit 1
+    fi
+    
+    local selected=0
+    
+    # 隐藏光标 + 保存屏幕
+    tput civis 2>/dev/null
+    tput smcup 2>/dev/null
+    trap 'tput cnorm 2>/dev/null; tput rmcup 2>/dev/null' EXIT
+    
+    while true; do
+        get_size
+        printf '\033[2J\033[H'
+        
+        # 顶部留白
+        echo ""
+        
+        # 标题（居中）
+        local title="🎵 歌曲添加器"
+        local padding=$(( (COLS - 20) / 2 ))
+        [ $padding -lt 0 ] && padding=0
+        printf "%${padding}s" ""
+        echo -e "${BOLD}${MAGENTA}$title${NC}"
+        
+        echo ""
+        local subtitle="选择一个数据源"
+        padding=$(( (COLS - 14) / 2 ))
+        [ $padding -lt 0 ] && padding=0
+        printf "%${padding}s" ""
+        echo -e "${DIM}$subtitle${NC}"
+        
+        echo ""
+        echo -e "${DIM}  ─────────────────────────────────────────${NC}"
+        echo ""
+        
+        # 选项
+        for i in "${!sources[@]}"; do
+            local name="${sources[$i]}"
+            local icon=$(get_icon "$name")
+            local desc=$(get_desc "$name")
+            
+            if [ $i -eq $selected ]; then
+                echo -e "  ${GREEN}${BOLD}▶ ${icon}  ${desc}${NC}  ${DIM}${name}${NC}"
+            else
+                echo -e "    ${DIM}${icon}  ${desc}  ${name}${NC}"
+            fi
+            echo ""
+        done
+        
+        # 底部提示
+        echo ""
+        echo -e "${DIM}  ─────────────────────────────────────────${NC}"
+        echo ""
+        echo -e "${DIM}  h/k ↑ 上 · j/l ↓ 下 · Enter 运行 · q 退出${NC}"
+        
+        # 状态栏
+        printf '\033[%d;1H' "$ROWS"
+        echo -e "${DIM}  [$((selected + 1))/$total]${NC}"
+        
+        # 读取按键
+        IFS= read -rsn1 key
+        
+        # 处理方向键
+        if [[ "$key" == $'\x1b' ]]; then
+            read -rsn2 -t 0.01 rest
+            key="$key$rest"
+        fi
+        
+        case "$key" in
+            'j'|'l'|$'\x1b[B'|$'\x1b[C')
+                ((selected++))
+                [ $selected -ge $total ] && selected=0
+                ;;
+            'k'|'h'|$'\x1b[A'|$'\x1b[D')
+                ((selected--))
+                [ $selected -lt 0 ] && selected=$((total - 1))
+                ;;
+            'g')
+                selected=0
+                ;;
+            'G')
+                selected=$((total - 1))
+                ;;
+            ''|$'\n'|$'\r')
+                # Enter：运行
+                local name="${sources[$selected]}"
+                local dir="$SCRIPT_DIR/song_adders/$name"
+                
+                tput cnorm 2>/dev/null
+                tput rmcup 2>/dev/null
+                trap - EXIT
+                clear
+                
+                echo -e "${GREEN}🚀 启动: $name${NC}"
+                echo -e "${DIM}   $dir/run${NC}"
+                echo ""
+                sleep 0.3
+                
+                cd "$dir" || exit 1
+                exec ./run
+                ;;
+            'q'|$'\x03')
+                tput cnorm 2>/dev/null
+                tput rmcup 2>/dev/null
+                trap - EXIT
+                clear
+                echo -e "${DIM}👋 再见${NC}"
+                exit 0
+                ;;
+        esac
+    done
+}
+
+main "$@"

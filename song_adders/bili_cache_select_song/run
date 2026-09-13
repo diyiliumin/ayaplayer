@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 切换到 TUI 目录
+cd "$SCRIPT_DIR/bili_select_song_tui/cmd/tui/" || exit 1
+
+# 创建软链接
+ln -sf "$SCRIPT_DIR/buildtree/target/release/buildtree" ./build
+ln -sf "$SCRIPT_DIR/buildtree/target/release/tree.json" ./tree.json
+
+# 运行 TUI
+./tui

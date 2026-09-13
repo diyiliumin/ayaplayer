@@ -1,0 +1,425 @@
+#!/bin/bash
+
+# 定义 DBus 信息
+BUS_NAME="com.ayaplayer"
+OBJECT_PATH="/com/ayaplayer/Status"
+INTERFACE="com.ayaplayer.Interface"
+
+# ============================================
+# 播放器调度器 - 基于插件 API
+# ============================================
+
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ===== 配置 =====
+PLAYLIST_FILE="${SCRIPT_DIR}/../to_be_played/playlist.json"
+PLAYERS_DIR="${SCRIPT_DIR}/../players/*/bin"
+CONTROL_PIPE="/tmp/player_control.pipe"
+
+# ===== 颜色定义 =====
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+
+# ===== 创建控制管道 =====
+rm -f "$CONTROL_PIPE"
+mkfifo "$CONTROL_PIPE"
+
+# ============================================
+# 插件调度函数
+# ============================================
+# 在 listplay3 里，播放器启动成功后
+publish_dbus() {
+    local pid="$1"
+    local title="$2"
+    local cover="$3"
+    local songleft="${4:-0}"
+    local paused="${5:-false}"
+    
+    dbus-send --session \
+        --type=signal \
+        /com/ayaplayer/Status \
+        com.ayaplayer.Interface.StatusChanged \
+        "int32:$pid" \
+        "string:$title" \
+        "string:$cover" \
+        "int32:$songleft" \
+	"boolean:$paused" \
+        2>/dev/null || true
+}
+
+# ============================================
+# DBus 监听 UI 启动信号
+# ============================================
+listen_ui_started() {
+    dbus-monitor --session "type='signal',interface='com.ayaplayer.Interface',member='UIStarted'" | while read -r line; do
+        # 解析 PID
+        UI_PID=$(echo "$line" | grep -oE 'int32\s+[0-9]+' | awk '{print $2}')
+	echo "llllllll" >&2
+	echo "$UI_PID" "$PLAY_PID" "$TITLE" 
+	echo "llllllll" >&2
+        if [ -n "$UI_PID" ] && [ -n "$PLAY_PID" ] && [ -n "$TITLE" ]; then
+            echo "🖥️ UI 启动: PID $UI_PID，广播当前状态" >&2
+            publish_dbus "$PLAY_PID" "$TITLE" "$COVER_PATH" "$REPEAT_COUNT" "$PAUSED"
+        fi
+    done
+}
+
+# ============================================
+# DBus 发送 UI 启动信号
+# ============================================
+send_ui_started() {
+    dbus-send --session \
+        --type=signal \
+        /com/ayaplayer/Control \
+        com.ayaplayer.Interface.Control \
+        "string:ui_started" \
+        "string:$$" \
+        2>/dev/null || true
+}
+
+listen_control() {
+    dbus-monitor --session "type='signal',interface='com.ayaplayer.Interface',member='Control'" | while read -r line; do
+        # 跳过空行和信号行
+        if [[ -z "$line" ]] || echo "$line" | grep -q "signal"; then
+            ACTION=""
+            DATA=""
+            continue
+        fi
+        
+        # 提取 string 内容
+        if echo "$line" | grep -q 'string "'; then
+            VALUE=$(echo "$line" | sed 's/.*string "\([^"]*\)".*/\1/')
+            # echo -e "\n\rVALUE: $VALUE" >&2
+            
+            # 保存到变量
+            if [[ -z "$ACTION" ]]; then
+                ACTION="$VALUE"
+            else
+                DATA="$VALUE"
+                # ★★★ 两个参数都拿到了，输出 ★★★
+                echo "$ACTION|$DATA" > "$CONTROL_PIPE"
+                echo "$ACTION|$DATA" >&2
+                # 重置
+                ACTION=""
+                DATA=""
+            fi
+        fi
+    done
+}
+
+# 查找并启动播放器
+find_and_play() {
+    local json="$1"
+    local scheme=$(echo "$json" | jq -r '.scheme')
+    
+    echo -e "\n${CYAN}📡 Scheme: $scheme${NC}\n" >&2
+    
+    # 遍历所有播放器
+    for player in $PLAYERS_DIR/*; do
+        if [ ! -x "$player" ]; then
+            continue
+        fi
+        
+        # 检查是否支持该 scheme
+        if "$player" --support 2>/dev/null | grep -q "$scheme"; then
+            echo -e "\n${BLUE}🔍 尝试播放器: $(basename "$player")${NC}\n" >&2
+            
+            # 尝试播放
+	    PLAY_PID=$("$player" --play "$json" )
+            # PLAY_PID=$("$player" --play "$json" 2>/dev/null)
+            
+            # 检查 PID 是否有效
+            if [[ "$PLAY_PID" =~ ^[0-9]+$ ]] && [ "$PLAY_PID" -gt 0 ]; then
+                # 成功！
+                echo -e "${GREEN}✅ 播放器启动成功: $(basename "$player")${NC}\n" >&2
+                
+                # 获取封面和标题
+                COVER_PATH=$("$player" --cover "$json" 2>/dev/null)
+                TITLE=$("$player" --title "$json" 2>/dev/null)
+
+                echo "$player|$PLAY_PID|$COVER_PATH|$TITLE"
+                return 0
+            else
+                echo -e "${RED}❌ 播放器失败: $(basename "$player")${NC}\n" >&2
+            fi
+        fi
+    done
+    
+    echo -e "${RED}❌ 没有找到可用的播放器${NC}\n" >&2
+    return 1
+}
+
+# ============================================
+# 显示播放列表
+# ============================================
+show_playlist() {
+    local file="$1"
+    if [[ ! -f "$file" ]] || [[ ! -s "$file" ]]; then
+        echo -e "${YELLOW}📋 播放列表为空${NC}"
+        return
+    fi
+    
+    local count=$(wc -l < "$file" 2>/dev/null || echo 0)
+    echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}📋 播放列表 (共 $count 首)${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    local line_num=0
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+        # 解析 JSON 行
+        title=$(echo "$line" | jq -r '.title // "未知"')
+        cid=$(echo "$line" | jq -r '.cid // ""')
+        
+        if [[ $line_num -eq 1 ]]; then
+            echo -e "${YELLOW}▶ ${line_num}.${NC} $title ${BLUE}[$cid]${NC} ${GREEN}← 当前${NC}"
+        else
+            echo -e "  ${line_num}. $title ${BLUE}[$cid]${NC}"
+        fi
+    done < "$file"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+}
+
+# ============================================
+# 读取并删除第一行
+# ============================================
+pop_first_line() {
+    local file="$1"
+    local first_line=""
+    
+    if [[ ! -f "$file" ]] || [[ ! -s "$file" ]]; then
+        echo ""
+        return 1
+    fi
+    
+    first_line=$(head -n 1 "$file")
+    tail -n +2 "$file" > "$file.tmp"
+    mv "$file.tmp" "$file"
+    
+    echo "$first_line"
+    return 0
+}
+
+# ============================================
+# 把行写回文件顶部
+# ============================================
+push_back_first_line() {
+    local file="$1"
+    local line="$2"
+    
+    if [[ -z "$line" ]]; then
+        return
+    fi
+    
+    echo "$line" | cat - "$file" > "$file.tmp"
+    mv "$file.tmp" "$file"
+}
+
+# ============================================
+# 监控播放器进程（独立子进程）
+# ============================================
+monitor_player() {
+    local pid="$1"
+    tail --pid="$pid" -f /dev/null 2>/dev/null
+    send_ui_started 
+}
+
+# ============================================
+# 主循环
+# ============================================
+main() {
+	echo -e "\033[?25l"
+    # 检查播放列表
+    if [[ ! -f "$PLAYLIST_FILE" ]]; then
+        echo -e "${YELLOW}⏳ 等待播放列表创建...${NC}"
+        sleep 2
+    fi
+    
+    echo -e "${GREEN}🎵 播放器调度器已启动${NC}"
+    echo -e "${BLUE}📂 播放器目录: $PLAYERS_DIR${NC}"
+    echo ""
+    
+    # 播放次数默认 1
+    REPEAT_COUNT=0
+    SONG_LOOP=1
+
+    set -m
+    listen_control &
+    LISTENER_PID=$!
+    set +m
+    
+    while true; do
+        # 检查播放列表是否存在且有内容
+        if [[ ! -f "$PLAYLIST_FILE" ]] || [[ ! -s "$PLAYLIST_FILE" ]]; then
+            echo -e -n "\r${YELLOW}⏳ 等待播放列表添加歌曲...${NC}"
+            sleep 5
+            continue
+        fi
+        
+        # 读取第一行
+        # FIRST_LINE=$(pop_first_line "$PLAYLIST_FILE")
+        FIRST_LINE=$(./gateway/gateway.sh pop)
+        if [[ -z "$FIRST_LINE" ]]; then
+            continue
+        fi
+        
+        # 解析 JSON
+        SCHEME=$(echo "$FIRST_LINE" | jq -r '.scheme // ""')
+        
+        
+        echo -e "${BLUE}   Scheme: $SCHEME${NC}"
+        echo ""
+        
+        # ============================================
+        # ★★★ 使用插件 API 播放 ★★★
+        # ============================================
+        result=$(find_and_play "$FIRST_LINE")
+        if [ $? -ne 0 ] || [ -z "$result" ]; then
+            echo -e "${RED}❌ 播放失败，跳过此曲${NC}"
+            continue
+        fi
+        
+	$SCRIPT_DIR/../user_interfaces/default < /dev/tty &
+	PLAY_UI_PID=$!
+        # 解析结果
+        IFS='|' read -r FOUND_PLAYER PLAY_PID COVER_PATH TITLE <<< "$result"
+        
+        echo -e "${GREEN}✅ 播放器: $(basename "$FOUND_PLAYER")${NC}"
+        echo -e "${GREEN}✅ PID: $PLAY_PID${NC}"
+        echo -e "${GREEN}✅ 封面: $COVER_PATH${NC}"
+        
+	# listen_ui_started &
+        # ============================================
+        # 键盘监听
+        # ============================================
+        echo -e "\n${BLUE}按 1-9 改变播放次数 | p 暂停 | x 跳过 | q 退出${NC}"
+        
+        PAUSED=false
+
+        
+	# ★★★ 启动监控子进程 ★★★
+	monitor_player "$PLAY_PID" &
+	MONITOR_PID=$!
+
+
+
+	
+	# ============================================
+	# 主循环 - 从管道读取
+	# ============================================
+	while read -r line < "$CONTROL_PIPE"; do
+	    # 检查播放器是否还在
+	    if ! kill -0 "$PLAY_PID" 2>/dev/null; then
+	        echo "📡 播放器已退出，停止监听" >&2
+	        break
+	    fi
+	    
+	    ACTION=$(echo "$line" | cut -d'|' -f1)
+	    DATA=$(echo "$line" | cut -d'|' -f2-)
+	    
+	    case "$ACTION" in
+	        'number')
+	            REPEAT_COUNT="$DATA"
+	            SONG_LOOP=$((REPEAT_COUNT + 1))
+	            echo -e "\n${GREEN}🔄 播放次数: $SONG_LOOP${NC}"
+	            publish_dbus "$PLAY_PID" "$TITLE" "$COVER_PATH" "$REPEAT_COUNT" "$PAUSED"
+	            ;;
+	            
+	        'pause')
+	            if [ "$DATA" = "true" ]; then
+	                kill -STOP "$PLAY_PID" 2>/dev/null
+	                PAUSED=true
+	                echo -e "\r⏸ 已暂停"
+	            else
+	                kill -CONT "$PLAY_PID" 2>/dev/null
+	                PAUSED=false
+	                echo -e "\r▶ 继续播放"
+	            fi
+	            publish_dbus "$PLAY_PID" "$TITLE" "$COVER_PATH" "$REPEAT_COUNT" "$PAUSED"
+	            ;;
+	            
+	        'skip')
+	            echo -e "\n⏹ 跳过此曲"
+	            kill "$PLAY_PID" 2>/dev/null
+	            kill "$PLAY_UI_PID" 2>/dev/null
+	            REPEAT_COUNT=$((SONG_LOOP - 1))
+		    ACTION=""
+		    DATA=""
+	            # ★★★ 跳出循环（跳到下一首） ★★★
+		    continue 2
+	            ;;
+	            
+	        'quit')
+	            # push_back_first_line "$PLAYLIST_FILE" "$FIRST_LINE"
+		    ./gateway/gateway.sh push "$FIRST_LINE"
+	            kill "$PLAY_PID" 2>/dev/null
+	            kill "$PLAY_UI_PID" 2>/dev/null
+		    kill -- -"$LISTENER_PID" 2>/dev/null
+	            echo -e "\n👋 退出播放"
+	            # ★★★ 清理管道 ★★★
+	            rm -f "$CONTROL_PIPE"
+	            exit 0
+	            ;;
+	            
+	        'ui_started')
+	            UI_PID="$DATA"
+	            echo "🖥️ UI 已启动 (PID: $UI_PID)"
+	            if [ -n "$PLAY_PID" ] && [ "$PLAY_PID" -gt 0 ]; then
+	                publish_dbus "$PLAY_PID" "$TITLE" "$COVER_PATH" "$REPEAT_COUNT" "$PAUSED"
+	            fi
+	            ;;
+	            
+	        *)
+	            echo "⚠️ 未知控制信号: $ACTION" >&2
+	            ;;
+	    esac
+	done
+        
+        # 播放完成
+        wait "$PLAY_PID" 2>/dev/null || true
+	kill "$PLAY_UI_PID"
+	# ★★★ 清理监控进程 ★★★
+	kill "$MONITOR_PID" 2>/dev/null
+        
+        # 处理重复播放
+        if [[ $REPEAT_COUNT -gt 0 ]]; then
+            ((REPEAT_COUNT--))
+            # push_back_first_line "$PLAYLIST_FILE" "$FIRST_LINE"
+            ./gateway/gateway.sh push "$FIRST_LINE"
+        else
+            REPEAT_COUNT=$((SONG_LOOP - 1))
+        fi
+        
+        echo -e "\n${GREEN}✓ 完成: $display_name${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        
+        sleep 0.5
+    done
+}
+
+# ============================================
+# 清理
+# ============================================
+cleanup() {
+    rm -f "$CONTROL_PIPE"
+    pkill ffplay 
+    kill "$PLAY_UI_PID"  2>/dev/null
+    # kill "$LISTENER_PID" 2>/dev/null 
+    kill -- -"$LISTENER_PID" 2>/dev/null
+    echo -e "\033[?25h"
+    reset
+    echo -e "\n${GREEN}👋 清理完成${NC}"
+}
+
+trap cleanup EXIT
+
+# ============================================
+# 启动
+# ============================================
+main
