@@ -5,6 +5,7 @@ OUTPUT_FILE="$HOME/fastfetch.txt"
 
 # 配置列表（目录和文件）
 CONFIGS=(
+	"./LICENSE"
 	"./launch.sh"
 	"./distros/active"
 	"./kernel/head"
@@ -31,6 +32,7 @@ CONFIGS=(
 	"./choose_song"
 	"./players/tcp_stream_player/bin/receiver"
 	"./players/tcp_stream_player/launch_transmitter"
+	"./players/tcp_stream_player/input_server.py"
 	"./players/tcp_stream_player/local/main.go"
 	"./players/tcp_stream_player/local/web/index.html"
 )
