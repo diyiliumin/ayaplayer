@@ -52,11 +52,11 @@ if [ "$SOURCE" = "local" ]; then
     trap cleanup EXIT
 
     echo "   FIFO: $FIFO"
-    echo "   URL:  http://localhost:8080"
+    echo "   URL:  http://localhost:10723"
     echo ""
 
     # 启动 go 服务，从 FIFO 读
-    exec "$BIN" -listen :8080 -type video/mp2t < "$FIFO"
+    exec "$BIN" -listen :10723 -type video/mp2t < "$FIFO"
 fi
 
 # ============================================
@@ -89,7 +89,8 @@ if [[ "$SOURCE" == http://* ]] || [[ "$SOURCE" == https://* ]]; then
     curl -v -X POST \
 	    -H "Content-Type: application/octet-stream" \
 	    -T - \
-	    http://localhost:8081/stream \
+            "${SOURCE%/}/stream" \
+	    # http://localhost:8081/stream \
 	    < "$FIFO" &
 
     PUSH_PID=$!
