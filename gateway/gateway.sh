@@ -174,9 +174,9 @@ cmd_commit() {
         local path=$(uri_to_path "$uri")
         
         # 备份
-        if [[ -f "$path" ]]; then
-            cp "$path" "${path}.bak.$(date +%s)"
-        fi
+        # if [[ -f "$path" ]]; then
+        #     cp "$path" "${path}.bak.$(date +%s)"
+        # fi
         
         cp "$CHECKOUT_FILE" "$path"
         echo "✅ 已写入: $path" >&2

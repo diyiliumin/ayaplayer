@@ -1,7 +1,8 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ln -sfn "$SCRIPT_DIR/../players/ffplay/" "$SCRIPT_DIR/../players/default"
+ln -sfn "$SCRIPT_DIR/../players/tcp_stream_player/" "$SCRIPT_DIR/../players/default"
+# $SCRIPT_DIR/../players/tcp_stream_player/launch_transmitter &
 $SCRIPT_DIR/../kernel/head &
 KERNEL_PID=$!
 $SCRIPT_DIR/../user_interfaces/default/bin/*

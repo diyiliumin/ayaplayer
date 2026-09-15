@@ -1,0 +1,115 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$SCRIPT_DIR/local/tcp_stream_player"
+FIFO="/tmp/tcp_stream_player.fifo"
+SOURCE_LIST="$SCRIPT_DIR/source_list.txt"
+
+# ============================================
+# 读数据源配置
+# ============================================
+if [ ! -f "$SOURCE_LIST" ]; then
+    echo "❌ 找不到 source_list.txt: $SOURCE_LIST" >&2
+    exit 1
+fi
+
+# 跳过空行和注释，取第一个有效行
+SOURCE=$(grep -v '^\s*#' "$SOURCE_LIST" | grep -v '^\s*$' | head -n 1)
+
+if [ -z "$SOURCE" ]; then
+    echo "❌ source_list.txt 为空" >&2
+    exit 1
+fi
+
+echo "📡 数据源: $SOURCE"
+
+# ============================================
+# 清理
+# ============================================
+pkill -f "$BIN" 2>/dev/null || true
+rm -f "$FIFO"
+
+# ============================================
+# 本地模式
+# ============================================
+if [ "$SOURCE" = "local" ]; then
+    echo "🏠 本地模式"
+
+    mkfifo "$FIFO"
+
+    # 保持写端，避免 open 阻塞
+    (
+        exec 3>"$FIFO"
+        while true; do sleep 3600; done
+    ) &
+    HOLDER_PID=$!
+
+    cleanup() {
+        kill "$HOLDER_PID" 2>/dev/null || true
+        rm -f "$FIFO"
+    }
+    trap cleanup EXIT
+
+    echo "   FIFO: $FIFO"
+    echo "   URL:  http://localhost:8080"
+    echo ""
+
+    # 启动 go 服务，从 FIFO 读
+    exec "$BIN" -listen :8080 -type video/mp2t < "$FIFO"
+fi
+
+# ============================================
+# 远程模式
+# ============================================
+if [[ "$SOURCE" == http://* ]] || [[ "$SOURCE" == https://* ]]; then
+    echo "🌐 远程模式"
+    echo "   目标: $SOURCE"
+
+    mkfifo "$FIFO"
+
+    # 保持写端
+    (
+        exec 3>"$FIFO"
+        while true; do sleep 3600; done
+    ) &
+    HOLDER_PID=$!
+
+    # 清理
+    PUSH_PID=""
+    cleanup() {
+        kill "$HOLDER_PID" 2>/dev/null || true
+        [ -n "$PUSH_PID" ] && kill "$PUSH_PID" 2>/dev/null || true
+        rm -f "$FIFO"
+    }
+    trap cleanup EXIT
+
+    # ★★★ 后台读 FIFO，用 curl POST 推到远程 ★★★
+    (
+        # 等待 FIFO 有写端
+        sleep 0.2
+
+        curl -s -X POST \
+            -H "Content-Type: application/octet-stream" \
+            -H "Transfer-Encoding: chunked" \
+            --data-binary "@$FIFO" \
+            "${SOURCE%/}/stream" \
+            2>/dev/null
+    ) &
+    PUSH_PID=$!
+
+    echo "   FIFO: $FIFO"
+    echo "   推送: ${SOURCE%/}/stream"
+    echo ""
+
+    # 等待推送进程
+    wait "$PUSH_PID"
+    exit 0
+fi
+
+# ============================================
+# 未知格式
+# ============================================
+echo "❌ 未知数据源格式: $SOURCE" >&2
+echo "   支持: local | http://... | https://..." >&2
+exit 1

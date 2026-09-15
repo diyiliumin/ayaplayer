@@ -61,9 +61,9 @@ listen_ui_started() {
     dbus-monitor --session "type='signal',interface='com.ayaplayer.Interface',member='UIStarted'" | while read -r line; do
         # 解析 PID
         UI_PID=$(echo "$line" | grep -oE 'int32\s+[0-9]+' | awk '{print $2}')
-	echo "llllllll" >&2
+	# echo "llllllll" >&2
 	echo "$UI_PID" "$PLAY_PID" "$TITLE" 
-	echo "llllllll" >&2
+	# echo "llllllll" >&2
         if [ -n "$UI_PID" ] && [ -n "$PLAY_PID" ] && [ -n "$TITLE" ]; then
             echo "🖥️ UI 启动: PID $UI_PID，广播当前状态" >&2
             publish_dbus "$PLAY_PID" "$TITLE" "$COVER_PATH" "$REPEAT_COUNT" "$PAUSED"
@@ -136,10 +136,17 @@ find_and_play() {
             # PLAY_PID=$("$" --pproviderlay "$json" 2>/dev/null)
 
 	    player_bin=$(echo "$PLAYER_DIR"/bin/*)
-	    "$provider" --getrawdata "$json" 2>/dev/null | "${player_bin[0]}" >/dev/null 2>&1 &
-	    PLAY_PID=$(echo $!) 
+	    bug_file=$(mktemp)
+	    rm -f "$bug_file"
+	    "$provider" --getrawdata "$json" 2>"$bug_file" | "${player_bin[0]}" >/dev/null 2>&1 &
+	    PLAY_PID=$(echo $!) #just get player, cut output, input over
+	    sleep 0.2
+	    # echo "lllllll" >&2
+	    # cat "$bug_file" >&2
+	    # echo "lllllll" >&2
             # 检查 PID 是否有效
-            if [[ "$PLAY_PID" =~ ^[0-9]+$ ]] && [ "$PLAY_PID" -gt 0 ]; then
+	    if [[ "$PLAY_PID" =~ ^[0-9]+$ ]] && [ "$PLAY_PID" -gt 0 ] && [ ! -s "$bug_file" ]; then
+		rm -f "$bug_file"
                 # 成功！
                 echo -e "${GREEN}✅ 播放器启动成功: $(basename "$provider")${NC}\n" >&2
                 
@@ -147,9 +154,11 @@ find_and_play() {
                 COVER_PATH=$("$provider" --cover "$json" 2>/dev/null)
                 TITLE=$("$provider" --title "$json" 2>/dev/null)
 
+                echo "$provider|$PLAY_PID|$COVER_PATH|$TITLE" >&2
                 echo "$provider|$PLAY_PID|$COVER_PATH|$TITLE"
                 return 0
             else
+		rm -f "$bug_file"
                 echo -e "${RED}❌ 播放器失败: $(basename "$provider")${NC}\n" >&2
             fi
         fi
