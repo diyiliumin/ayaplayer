@@ -27,7 +27,7 @@ echo "📡 数据源: $SOURCE"
 # ============================================
 # 清理
 # ============================================
-pkill -f "$BIN" 2>/dev/null || true
+# pkill -f "$BIN" 2>/dev/null || true
 rm -f "$FIFO"
 
 # ============================================
@@ -85,17 +85,13 @@ if [[ "$SOURCE" == http://* ]] || [[ "$SOURCE" == https://* ]]; then
     trap cleanup EXIT
 
     # ★★★ 后台读 FIFO，用 curl POST 推到远程 ★★★
-    (
-        # 等待 FIFO 有写端
-        sleep 0.2
 
-        curl -s -X POST \
-            -H "Content-Type: application/octet-stream" \
-            -H "Transfer-Encoding: chunked" \
-            --data-binary "@$FIFO" \
-            "${SOURCE%/}/stream" \
-            2>/dev/null
-    ) &
+    curl -v -X POST \
+	    -H "Content-Type: application/octet-stream" \
+	    -T - \
+	    http://localhost:8081/stream \
+	    < "$FIFO" &
+
     PUSH_PID=$!
 
     echo "   FIFO: $FIFO"
