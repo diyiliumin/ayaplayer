@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>MPEG-TS Stream</title>
+<style>
+body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    margin: 0;
+}
+h1 { color: #58a6ff; }
+audio { width: 400px; margin-top: 20px; }
+.status { margin-top: 16px; font-size: 14px; color: #8b949e; }
+.status.ok { color: #3fb950; }
+.status.err { color: #f85149; }
+.status.warn { color: #d29922; }
+</style>
+</head>
+<body>
+<h1>🎵 MPEG-TS Stream</h1>
+<audio id="player" controls autoplay></audio>
+<div class="status" id="status">加载中...</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
+<script>
+const audio = document.getElementById('player');
+const status = document.getElementById('status');
+
+let player = null;
+let reconnectTimer = null;
+let stallTimer = null;
+let lastTime = 0;
+let reconnectCount = 0;
+
+function setStatus(text, cls = '') {
+    status.textContent = text;
+    status.className = 'status ' + cls;
+}
+
+// ★★★ 重连 ★★★
+function reconnect(reason) {
+    if (reconnectTimer) return;  // 已经在重连中
+
+    reconnectCount++;
+    console.log(`重连 #${reconnectCount}: ${reason}`);
+    setStatus(`⚠️ 流中断 (${reason})，重连中...`, 'warn');
+
+    if (player) {
+        try { player.destroy(); } catch(e) {}
+        player = null;
+    }
+
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        createPlayer();
+    }, 1000);
+}
+
+// ★★★ 创建播放器 ★★★
+function createPlayer() {
+    if (player) {
+        try { player.destroy(); } catch(e) {}
+        player = null;
+    }
+
+    player = mpegts.createPlayer({
+        type: 'mpegts',
+        url: '/stream?_=' + Date.now(),
+        isLive: true,
+    });
+
+    player.attachMediaElement(audio);
+    player.load();
+    player.play().catch(e => console.log('play failed:', e));
+
+    // ★ 1. mpegts ERROR 事件 ★
+    player.on(mpegts.Events.ERROR, (type, detail) => {
+        console.log('mpegts error:', type, detail);
+        reconnect(`mpegts:${type}`);
+    });
+
+    // ★ 2. mpegts STATISTICS_INFO（可选）★
+    player.on(mpegts.Events.STATISTICS_INFO, (info) => {
+        // 可以监控 speed, decodedFrames 等
+    });
+
+    // ★ 3. audio 事件 ★
+    audio.addEventListener('playing', () => {
+        setStatus('✅ 播放中', 'ok');
+        lastTime = audio.currentTime;
+    });
+
+    audio.addEventListener('stalled', () => {
+        reconnect('stalled');
+    });
+
+    audio.addEventListener('ended', () => {
+        reconnect('ended');
+    });
+
+    audio.addEventListener('error', (e) => {
+        reconnect('audio-error');
+    });
+}
+
+// ★★★ 定时检测流是否活跃 ★★★
+function startStallDetection() {
+    setInterval(() => {
+        if (!audio || audio.paused) return;
+
+        if (audio.currentTime === lastTime) {
+            // 3 秒没变化，认为中断
+            reconnect('stall-timeout');
+        } else {
+            lastTime = audio.currentTime;
+        }
+    }, 3000);
+}
+
+// ★★★ 启动 ★★★
+if (mpegts.getFeatureList().mseLivePlayback) {
+    createPlayer();
+    startStallDetection();
+} else {
+    setStatus('❌ 浏览器不支持 MSE', 'err');
+}
+</script>
+</body>
+</html>
