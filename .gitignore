@@ -80,8 +80,3 @@ Thumbs.db
 build/
 dist/
 target/
-song_adders/*/buildtree*/
-!song_adders/*/buildtree*/build.sh
-!song_adders/*/buildtree*/*.py
-!song_adders/*/buildtree*/*.go
-!song_adders/*/buildtree*/*.rs

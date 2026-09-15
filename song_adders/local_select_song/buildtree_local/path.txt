@@ -1,0 +1,3 @@
+# 在此写入你的音乐目录路径（一行，绝对路径）
+# 例如: /home/you/Music
+/mnt/d/SteamLibrary/steamapps/music/
