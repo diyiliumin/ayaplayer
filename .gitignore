@@ -29,12 +29,7 @@ package-lock.json
 
 # ===== 运行时数据 =====
 # 数据源
-playlist.json
-playlist.jsonl
-playlist.json.bak.*
-playlist.txt
-*.bak
-*.bak.*
+# playlist.json
 
 # tree.json（生成的）
 tree.json
