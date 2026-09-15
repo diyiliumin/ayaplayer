@@ -124,6 +124,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 10722
-    print(f"📥 服务: http://0.0.0.0:{port}/stream", file=sys.stderr)
+    print(f"📥 服务: http://127.0.0.1:{port}/stream", file=sys.stderr)
     print(f"   FIFO: {FIFO}", file=sys.stderr)
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
