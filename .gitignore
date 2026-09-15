@@ -10,6 +10,9 @@ bili_select_song_tui/cmd/tui/tui
 song_adders/shared/bili_select_song_tui/cmd/tui/tui
 song_adders/*/bin/tui
 players/tcp_stream_player/local/
+!players/tcp_stream_player/local/web/index.html
+!players/tcp_stream_player/local/go.mod
+!players/tcp_stream_player/local/main.go
 
 # Python
 __pycache__/
