@@ -4,6 +4,7 @@
 *.so
 *.dylib
 
+./showoff
 # Go
 tui
 bili_select_song_tui/cmd/tui/tui
