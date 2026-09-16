@@ -215,9 +215,9 @@ op_write() {
         fi
     else
         local path=$(uri_to_path "$uri")
-        if [[ -f "$path" ]]; then
-            cp "$path" "${path}.bak.$(date +%s)"
-        fi
+        # if [[ -f "$path" ]]; then
+        #     cp "$path" "${path}.bak.$(date +%s)"
+        # fi
         printf '%s' "$content" > "$path"
         echo "✅ 已写入: $path" >&2
         return 0
