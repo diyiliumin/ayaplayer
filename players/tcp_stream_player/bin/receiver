@@ -1,23 +1,11 @@
 #!/bin/bash
+
 set -e
 
-FIFO="/tmp/tcp_stream_player.fifo"
+# 清理旧文件
+rm -f "$OUT_DIR"/*.ts
 
-# 检查 FIFO
-if [ ! -p "$FIFO" ]; then
-    echo "❌ FIFO 不存在: $FIFO" >&2
-    echo "   先运行: launch_transmitter" >&2
-    exit 1
-fi
-
-# # 检查服务
-# if ! fuser "$FIFO" >/dev/null 2>&1; then
-#     echo "⚠️ 服务未运行，只本地播放" >&2
-#     cat "$@" | ffplay -v 0 -nodisp -autoexit -volume 0 - >/dev/null 2>&1
-#     exit 0
-# fi
-
-# ★★★ ffmpeg -re 转码成 MPEG-TS，推给 FIFO ★★★
+# ★★★ 按时间分片
 exec ffmpeg \
     -hide_banner \
     -loglevel error \
@@ -25,10 +13,45 @@ exec ffmpeg \
     -i pipe:0 \
     -c:a aac \
     -b:a 128k \
-    -f mpegts \
-    -muxdelay 0 \
-    -muxpreload 0 \
-    pipe:1 > "$FIFO"
+    -f segment \
+    -segment_time 2 \
+    -segment_format mpegts \
+    -segment_atclocktime 1 \
+    -reset_timestamps 1 \
+    -strftime 1 \
+    "$OUT_DIR/%s.ts"
 
-# cat "$@" | tee /tmp/tcp_stream_player.fifo | ffplay -v 0 -nodisp -autoexit -volume 0 - >/dev/null 2>&1
 
+# set -e
+#
+# FIFO="/tmp/tcp_stream_player.fifo"
+#
+# # 检查 FIFO
+# if [ ! -p "$FIFO" ]; then
+#     echo "❌ FIFO 不存在: $FIFO" >&2
+#     echo "   先运行: launch_transmitter" >&2
+#     exit 1
+# fi
+#
+# # # 检查服务
+# # if ! fuser "$FIFO" >/dev/null 2>&1; then
+# #     echo "⚠️ 服务未运行，只本地播放" >&2
+# #     cat "$@" | ffplay -v 0 -nodisp -autoexit -volume 0 - >/dev/null 2>&1
+# #     exit 0
+# # fi
+#
+# # ★★★ ffmpeg -re 转码成 MPEG-TS，推给 FIFO ★★★
+# exec ffmpeg \
+#     -hide_banner \
+#     -loglevel error \
+#     -re \
+#     -i pipe:0 \
+#     -c:a aac \
+#     -b:a 128k \
+#     -f mpegts \
+#     -muxdelay 0 \
+#     -muxpreload 0 \
+#     pipe:1 > "$FIFO"
+#
+# # cat "$@" | tee /tmp/tcp_stream_player.fifo | ffplay -v 0 -nodisp -autoexit -volume 0 - >/dev/null 2>&1
+#

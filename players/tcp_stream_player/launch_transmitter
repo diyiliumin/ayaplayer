@@ -3,6 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$SCRIPT_DIR/local/tcp_stream_player"
+TS_DIR="${TS_DIR:-/tmp/ts_stream}"
 FIFO="/tmp/tcp_stream_player.fifo"
 SOURCE_LIST="$SCRIPT_DIR/source_list.txt"
 
@@ -14,8 +15,8 @@ if [ ! -f "$SOURCE_LIST" ]; then
     exit 1
 fi
 
-# 跳过空行和注释，取第一个有效行
 SOURCE=$(grep -v '^\s*#' "$SOURCE_LIST" | grep -v '^\s*$' | head -n 1)
+SOURCE=$(echo "$SOURCE" | tr -d '\r')
 
 if [ -z "$SOURCE" ]; then
     echo "❌ source_list.txt 为空" >&2
@@ -25,82 +26,91 @@ fi
 echo "📡 数据源: $SOURCE"
 
 # ============================================
-# 清理
-# ============================================
-# pkill -f "$BIN" 2>/dev/null || true
-rm -f "$FIFO"
-
-# ============================================
-# 本地模式
+# 本地模式：监控 TS 目录，喂给 Go 服务
 # ============================================
 if [ "$SOURCE" = "local" ]; then
     echo "🏠 本地模式"
+    echo "   TS 目录: $TS_DIR"
+    echo "   URL:     http://localhost:10723"
 
+    mkdir -p "$TS_DIR"
+
+    # 创建 FIFO，Go 服务从这里读
+    rm -f "$FIFO"
     mkfifo "$FIFO"
 
-    # 保持写端，避免 open 阻塞
+    # ★★★ 监控 TS 目录，新分片就写入 FIFO ★★★
     (
-        exec 3>"$FIFO"
-        while true; do sleep 3600; done
+        # 记录已处理的文件
+        declare -A SEEN
+
+        # 先处理已存在的文件
+        for f in "$TS_DIR"/*.ts; do
+            [ -f "$f" ] || continue
+            echo "📤 初始分片: $f" >&2
+            cat "$f" > "$FIFO"
+            SEEN["$f"]=1
+        done
+
+        # 监控新文件
+        inotifywait -m -e close_write --format '%w%f' "$TS_DIR" 2>/dev/null | \
+        while read -r file; do
+            [[ "$file" != *.ts ]] && continue
+            [[ -n "${SEEN[$file]}" ]] && continue
+            SEEN["$file"]=1
+
+            echo "📤 新分片: $file" >&2
+            cat "$file" > "$FIFO"
+        done
     ) &
-    HOLDER_PID=$!
+    TS_FEEDER_PID=$!
 
     cleanup() {
-        kill "$HOLDER_PID" 2>/dev/null || true
+        kill "$TS_FEEDER_PID" 2>/dev/null || true
         rm -f "$FIFO"
     }
     trap cleanup EXIT
 
-    echo "   FIFO: $FIFO"
-    echo "   URL:  http://localhost:10723"
     echo ""
+    echo "🚀 启动 Go 服务..."
 
-    # 启动 go 服务，从 FIFO 读
+    # Go 服务从 FIFO 读
     exec "$BIN" -listen :10723 -type video/mp2t < "$FIFO"
 fi
 
 # ============================================
-# 远程模式
+# 远程模式：监控 TS 目录，逐个上传
 # ============================================
 if [[ "$SOURCE" == http://* ]] || [[ "$SOURCE" == https://* ]]; then
     echo "🌐 远程模式"
     echo "   目标: $SOURCE"
+    echo "   TS 目录: $TS_DIR"
 
-    mkfifo "$FIFO"
+    mkdir -p "$TS_DIR"
 
-    # 保持写端
-    (
-        exec 3>"$FIFO"
-        while true; do sleep 3600; done
-    ) &
-    HOLDER_PID=$!
+    URL="${SOURCE%/}/segment"
 
-    # 清理
-    PUSH_PID=""
-    cleanup() {
-        kill "$HOLDER_PID" 2>/dev/null || true
-        [ -n "$PUSH_PID" ] && kill "$PUSH_PID" 2>/dev/null || true
-        rm -f "$FIFO"
-    }
-    trap cleanup EXIT
-
-    # ★★★ 后台读 FIFO，用 curl POST 推到远程 ★★★
-
-    curl -v -X POST \
-	    -H "Content-Type: application/octet-stream" \
-	    -T - \
-            "${SOURCE%/}/stream" \
-	    # http://localhost:8081/stream \
-	    < "$FIFO" &
-
-    PUSH_PID=$!
-
-    echo "   FIFO: $FIFO"
-    echo "   推送: ${SOURCE%/}/stream"
+    echo "   推送: $URL"
     echo ""
 
-    # 等待推送进程
-    wait "$PUSH_PID"
+    # ★★★ 监控 TS 目录，逐个上传 ★★★
+    inotifywait -m -e close_write --format '%w%f' "$TS_DIR" 2>/dev/null | \
+    while read -r file; do
+        [[ "$file" != *.ts ]] && continue
+
+        echo "📤 上传: $(basename "$file")" >&2
+
+        # 单个分片单独 POST
+        curl --http1.1 -s -X POST \
+            -H "Content-Type: video/mp2t" \
+            --data-binary "@$file" \
+            "$URL" \
+            -o /dev/null -w "  → HTTP %{http_code} (%{size_upload} bytes)\n" >&2
+
+        # 可选：上传后删除
+        # rm -f "$file"
+    done
+
     exit 0
 fi
 
@@ -108,5 +118,4 @@ fi
 # 未知格式
 # ============================================
 echo "❌ 未知数据源格式: $SOURCE" >&2
-echo "   支持: local | http://... | https://..." >&2
 exit 1
