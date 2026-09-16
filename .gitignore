@@ -4,6 +4,7 @@
 *.so
 *.dylib
 ./players/tcp_stream_player/source_list.txt
+./to_be_played/playlist.json
 ./showoff
 # Go
 tui
