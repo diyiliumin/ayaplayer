@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for fakehexwithascii (ayaplayer UI)
+#
+# Checks:
+#   1. bin/ has the UI script
+#   2. config/cavacfg present
+#   3. python3 syntax
+#   4. python deps: PIL, numpy, dbus, gi (GLib), requests
+#   5. external tools: cava, dbus-send, reset
+#   6. DBus session bus reachable
+#   7. can emit on com.ayaplayer.Interface.Control
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+BIN_DIR="$SELF_DIR/bin"
+CONFIG_DIR="$SELF_DIR/config"
+CAVACFG="$CONFIG_DIR/cavacfg"
+UI_SCRIPT="$BIN_DIR/fakehexwithascii.py"
+
+CONTROL_PATH="/com/ayaplayer/Control"
+INTERFACE="com.ayaplayer.Interface"
+
+# ---------- flags ----------
+WANT_DBUS=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-dbus) WANT_DBUS=0 ;;
+        -h|--help)
+            sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *) echo "unknown flag: $arg" >&2; exit 2 ;;
+    esac
+done
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0; FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "base dir: $SELF_DIR"
+
+# ---------- 1. UI script ----------
+if [ -d "$BIN_DIR" ]; then
+    found=""
+    while IFS= read -r -d '' f; do
+        base="$(basename -- "$f")"
+        case "$base" in
+            .*|*.bak|*.log|*.tmp|*.swp|*~) continue ;;
+        esac
+        found="$f"
+        break
+    done < <(find "$BIN_DIR" -maxdepth 1 -type f -print0 2>/dev/null)
+
+    if [ -n "$found" ]; then
+        UI_SCRIPT="$found"
+        ok "UI script: $UI_SCRIPT"
+        if [ -x "$UI_SCRIPT" ]; then
+            ok "UI script executable"
+        else
+            warn "UI script not executable"
+        fi
+        if head -n1 "$UI_SCRIPT" 2>/dev/null | grep -q '^#!.*python'; then
+            ok "UI script has python shebang"
+        else
+            warn "UI script has no python shebang"
+        fi
+    else
+        bad "no UI script found in $BIN_DIR"
+    fi
+else
+    bad "bin/ missing: $BIN_DIR"
+fi
+
+# ---------- 2. config/cavacfg ----------
+if [ -f "$CAVACFG" ]; then
+    ok "config/cavacfg present"
+    if [ ! -s "$CAVACFG" ]; then
+        warn "config/cavacfg is empty"
+    fi
+else
+    bad "config/cavacfg missing: $CAVACFG"
+fi
+
+# ---------- 3. python syntax ----------
+if command -v python3 >/dev/null 2>&1; then
+    if [ -f "$UI_SCRIPT" ]; then
+        if python3 -m py_compile "$UI_SCRIPT" 2>/dev/null; then
+            ok "UI script compiles"
+        else
+            bad "UI script has a syntax error"
+        fi
+    fi
+else
+    bad "python3 not in PATH"
+fi
+
+# ---------- 4. python deps ----------
+# PIL is imported as `from PIL import ...`
+# dbus + gi.repository.GLib are separate
+# numpy, requests
+if command -v python3 >/dev/null 2>&1; then
+    declare -A DEPS=(
+        [PIL]="from PIL import Image, ImageDraw, ImageFilter"
+        [numpy]="import numpy"
+        [requests]="import requests"
+        [dbus]="import dbus, dbus.mainloop.glib"
+        [gi]="from gi.repository import GLib"
+    )
+    for name in PIL numpy requests dbus gi; do
+        code="${DEPS[$name]}"
+        if python3 -c "$code" 2>/dev/null; then
+            ok "python3 can import $name"
+        else
+            bad "python3 cannot import $name"
+        fi
+    done
+fi
+
+# ---------- 5. external tools ----------
+for tool in cava dbus-send reset; do
+    if command -v "$tool" >/dev/null 2>&1; then
+        ok "$tool available"
+    else
+        bad "$tool not found in PATH"
+    fi
+done
+
+# cava version (helpful info, not a requirement)
+if command -v cava >/dev/null 2>&1; then
+    v=$(cava --version 2>&1 | head -n1 || true)
+    [ -n "$v" ] && info "cava: $v"
+fi
+
+# ---------- 6. DBus session ----------
+if [ "$WANT_DBUS" -eq 1 ]; then
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        warn "DBUS_SESSION_BUS_ADDRESS not set (UI needs a session bus)"
+    else
+        ok "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+    fi
+
+    if dbus-send --session --dest=org.freedesktop.DBus \
+            --type=method_call --print-reply \
+            /org/freedesktop/DBus org.freedesktop.DBus.ListNames \
+            >/dev/null 2>&1; then
+        ok "session bus reachable"
+    else
+        bad "session bus not reachable"
+    fi
+
+    # ayaplayer owner?
+    if dbus-send --session --dest=org.freedesktop.DBus \
+            --type=method_call --print-reply \
+            /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
+            "string:com.ayaplayer" 2>/dev/null | grep -q 'true'; then
+        ok "bus name owned: com.ayaplayer"
+    else
+        info "bus name com.ayaplayer has no owner yet (kernel not running)"
+    fi
+
+    # can we emit on the Control interface?
+    if dbus-send --session --type=signal \
+            "$CONTROL_PATH" "$INTERFACE.Control" \
+            "string:hc_probe" "string:$$" >/dev/null 2>&1; then
+        ok "can emit on $INTERFACE.Control"
+    else
+        bad "cannot emit on $INTERFACE.Control"
+    fi
+fi
+
+# ---------- 7. cava config sanity ----------
+# cava config is INI-ish; just check a couple of expected keys exist.
+if [ -f "$CAVACFG" ]; then
+    for key in '\[general\]' '\[output\]'; do
+        if grep -qE "$key" "$CAVACFG"; then
+            ok "cavacfg contains $key section"
+        else
+            warn "cavacfg missing $key section"
+        fi
+    done
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

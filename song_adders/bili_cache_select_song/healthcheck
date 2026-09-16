@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for bili_cache_select_song
+#
+# Checks:
+#   1. run entry point exists & executable
+#   2. buildtree/target/release/buildtree exists (build if not)
+#   3. buildtree/config.json exists & is valid JSON with "root"
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+RUN="$SELF_DIR/run"
+BUILDTREE_DIR="$SELF_DIR/buildtree"
+RELEASE_BIN="$BUILDTREE_DIR/target/release/buildtree"
+CONFIG_JSON="$BUILDTREE_DIR/config.json"
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0; FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "base dir: $SELF_DIR"
+
+# ---------- 1. run entry point ----------
+if [ -f "$RUN" ]; then
+    ok "run entry point present"
+    [ -x "$RUN" ] && ok "run is executable" || bad "run is not executable"
+else
+    bad "run entry point missing: $RUN"
+fi
+
+# ---------- 2. buildtree binary ----------
+if [ -x "$RELEASE_BIN" ]; then
+    size=$(stat -c%s "$RELEASE_BIN" 2>/dev/null || echo 0)
+    ok "buildtree binary present ($size bytes)"
+elif [ -f "$RELEASE_BIN" ]; then
+    bad "buildtree binary exists but is not executable: $RELEASE_BIN"
+else
+    bad "buildtree binary not built: $RELEASE_BIN"
+    echo ""
+    echo "  Please build it yourself:"
+    echo "      cd $BUILDTREE_DIR"
+    echo "      cargo build --release"
+    echo ""
+    exit 1
+fi
+
+# ---------- 3. config.json ----------
+if [ ! -f "$CONFIG_JSON" ]; then
+    bad "config.json missing: $CONFIG_JSON"
+else
+    if command -v jq >/dev/null 2>&1; then
+        if jq -e . "$CONFIG_JSON" >/dev/null 2>&1; then
+            root=$(jq -r '.root // ""' "$CONFIG_JSON")
+            if [ -n "$root" ]; then
+                ok "config.json root: $root"
+                if [ -d "$root" ]; then
+                    ok "root directory exists"
+                else
+                    warn "root directory does not exist: $root"
+                fi
+            else
+                bad "config.json has empty 'root'"
+            fi
+        else
+            bad "config.json is not valid JSON"
+        fi
+    else
+        warn "jq not available, skipping config.json validation"
+    fi
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

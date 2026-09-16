@@ -107,6 +107,7 @@ def read_key_nonblock():
 
 
 def keyboard_listener():
+    listener = PlayerStatusListener()
     print("⌨️ 键盘监听已启动", file=sys.stderr)
     print("  1-9: 设置次数  p: 暂停  x: 跳过  q: 退出", file=sys.stderr)
     
@@ -115,6 +116,7 @@ def keyboard_listener():
     PAUSED = False
     
     while True:
+        _, _, _, REPEAT_COUNT, PAUSED = listener.get_status()
         global should_exit
         if should_exit:
             sys.exit(0)
@@ -131,9 +133,7 @@ def keyboard_listener():
                 should_exit = True
 
             elif key.lower() == 'p':
-                PAUSED = not PAUSED
-                send_pause(PAUSED)
-                print("\n⏸ 已暂停" if PAUSED else "\n▶ 继续播放")
+                send_pause(not PAUSED)
             
             elif key.lower() == 'x':
                 send_skip()
@@ -461,7 +461,7 @@ def main():
                     sys.stdout.write(f"\033[{rows};1H")
 
                 else:
-                    status_text = f"⏸ {title} 剩余: {songleft}次"
+                    status_text = "⏸ 已暂停"
                     sys.stdout.write("\r" + status_text + " " * 3 )
 
             except Exception:

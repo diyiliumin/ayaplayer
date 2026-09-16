@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for the biliweb player plugin
+#
+# Usage:
+#   ./healthcheck
+#   SAMPLE_BVID=BV1xx411c7mD ./healthcheck    # optional network probe
+#
+# Assumes layout:
+#   <script_dir>/bin/<plugin>          (any single regular file)
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+BIN_DIR="$SELF_DIR/bin"
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0
+FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "base dir: $SELF_DIR"
+
+# ---------- 1. find the plugin in bin/ ----------
+if [ ! -d "$BIN_DIR" ]; then
+    bad "bin/ directory missing: $BIN_DIR"
+    exit 1
+fi
+
+PLUGIN_CANDIDATES=()
+while IFS= read -r -d '' f; do
+    base="$(basename -- "$f")"
+    case "$base" in
+        .*|*.bak|*.log|*.tmp|*.swp|*~) continue ;;
+    esac
+    PLUGIN_CANDIDATES+=("$f")
+done < <(find "$BIN_DIR" -maxdepth 1 -type f -print0 2>/dev/null)
+
+if [ "${#PLUGIN_CANDIDATES[@]}" -eq 0 ]; then
+    bad "no plugin file found in $BIN_DIR"
+    exit 1
+fi
+
+if [ "${#PLUGIN_CANDIDATES[@]}" -gt 1 ]; then
+    warn "multiple files in bin/, picking the first one:"
+    for f in "${PLUGIN_CANDIDATES[@]}"; do info "  - $f"; done
+fi
+
+SCRIPT_PATH="${PLUGIN_CANDIDATES[0]}"
+info "plugin:   $SCRIPT_PATH"
+
+# ---------- 2. runner ----------
+if [ -x "$SCRIPT_PATH" ]; then
+    RUNNER=("$SCRIPT_PATH")
+else
+    if head -c 64 "$SCRIPT_PATH" 2>/dev/null | grep -q '^#!.*python'; then
+        warn "plugin not executable, running via python3"
+        RUNNER=(python3 "$SCRIPT_PATH")
+    else
+        warn "plugin not executable; trying to run directly anyway"
+        RUNNER=("$SCRIPT_PATH")
+    fi
+fi
+
+# ---------- 3. --support ----------
+if out=$("${RUNNER[@]}" --support 2>/dev/null); then
+    if [ "$out" = "bilicache" ]; then
+        ok "--support reports 'bilicache'"
+    else
+        bad "--support returned unexpected output: '$out'"
+    fi
+else
+    bad "--support failed to run"
+fi
+
+# ---------- 4. external tools ----------
+if command -v yt-dlp >/dev/null 2>&1; then
+    if yt-dlp --version >/dev/null 2>&1; then
+        ver=$(yt-dlp --version 2>/dev/null | head -n1)
+        ok "yt-dlp available ($ver)"
+    else
+        bad "yt-dlp present but not runnable"
+    fi
+else
+    bad "yt-dlp not found in PATH"
+fi
+
+if command -v ffplay >/dev/null 2>&1; then
+    if ffplay -version >/dev/null 2>&1; then
+        ok "ffplay available"
+    else
+        bad "ffplay present but not runnable"
+    fi
+else
+    bad "ffplay not found in PATH"
+fi
+
+command -v python3 >/dev/null 2>&1 && ok "python3 available" || bad "python3 not found in PATH"
+
+# ---------- 5. optional: network probe + JSON handling ----------
+if [ -n "${SAMPLE_BVID:-}" ]; then
+    sample=$(printf '{"bvid":"%s","p":1,"title":"Test Title","group":"Test Group","category":"Test Category","pic":""}' "$SAMPLE_BVID")
+
+    info "Testing --canwork with bvid=$SAMPLE_BVID"
+    if "${RUNNER[@]}" --canwork "$sample" >/dev/null 2>&1; then
+        ok "--canwork succeeded for bvid=$SAMPLE_BVID"
+    else
+        bad "--canwork failed for bvid=$SAMPLE_BVID"
+    fi
+
+    info "Testing --title with bvid=$SAMPLE_BVID"
+    if title=$("${RUNNER[@]}" --title "$sample" 2>/dev/null); then
+        [ -n "$title" ] && ok "--title returned: $title" || bad "--title returned empty"
+    else
+        bad "--title failed"
+    fi
+
+    info "Testing --cover with bvid=$SAMPLE_BVID"
+    if cover=$("${RUNNER[@]}" --cover "$sample" 2>/dev/null); then
+        # biliweb returns a URL, not a local file — just check non-empty
+        if [ -n "$cover" ]; then
+            case "$cover" in
+                http://*|https://*) ok "--cover returned URL: $cover" ;;
+                *)                  warn "--cover returned non-URL: $cover" ;;
+            esac
+        else
+            warn "--cover returned empty (no pic in JSON)"
+        fi
+    else
+        bad "--cover failed"
+    fi
+else
+    warn "SAMPLE_BVID not set; skipping --canwork/--cover/--title tests"
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for steam_select_song
+#
+# Checks:
+#   1. run entry point
+#   2. buildtree_steam/build_steam.sh & buildtree_steam.py
+#   3. python3 syntax + stdlib-only
+#   4. build_steam.sh -s returns config.json path
+#   5. config.json valid JSON, "root" points at a real dir
+#      (falls back to Steam default roots)
+#   6. tree.json valid JSON (if present)
+#   7. sibling bili_select_song_tui symlink + binary
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+RUN="$SELF_DIR/run"
+STEAM_DIR="$SELF_DIR/buildtree_steam"
+BUILD_SH="$STEAM_DIR/build_steam.sh"
+BUILD_PY="$STEAM_DIR/buildtree_steam.py"
+CONFIG_JSON="$STEAM_DIR/config.json"
+TREE_JSON="$STEAM_DIR/tree.json"
+TUI_LINK="$SELF_DIR/bili_select_song_tui"
+
+# Steam default fallbacks (mirrors DEFAULT_ROOTS in the python script)
+STEAM_DEFAULTS=(
+    "$HOME/.steam/steam/steamapps/music"
+    "$HOME/.local/share/Steam/steamapps/music"
+    "$HOME/.steam/steamapps/music"
+)
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0; FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "base dir: $SELF_DIR"
+
+# ---------- 1. run entry point ----------
+if [ -f "$RUN" ]; then
+    ok "run present"
+    [ -x "$RUN" ] && ok "run executable" || bad "run not executable"
+else
+    bad "run missing: $RUN"
+fi
+
+# ---------- 2. buildtree_steam files ----------
+if [ -f "$BUILD_SH" ]; then
+    ok "build_steam.sh present"
+    [ -x "$BUILD_SH" ] && ok "build_steam.sh executable" || bad "build_steam.sh not executable"
+else
+    bad "build_steam.sh missing: $BUILD_SH"
+fi
+
+if [ -f "$BUILD_PY" ]; then
+    ok "buildtree_steam.py present"
+else
+    bad "buildtree_steam.py missing: $BUILD_PY"
+fi
+
+# ---------- 3. python syntax + stdlib-only ----------
+if command -v python3 >/dev/null 2>&1; then
+    if [ -f "$BUILD_PY" ]; then
+        if python3 -m py_compile "$BUILD_PY" 2>/dev/null; then
+            ok "buildtree_steam.py compiles"
+        else
+            bad "buildtree_steam.py has a syntax error"
+        fi
+
+        third_party=$(grep -E '^\s*(import|from)\s+' "$BUILD_PY" \
+            | grep -vE '\b(hashlib|json|sys|pathlib|os|re|typing|collections|dataclasses|datetime|functools|itertools|math|random|shutil|subprocess|tempfile|time|uuid)\b' \
+            || true)
+        if [ -z "$third_party" ]; then
+            ok "buildtree_steam.py is stdlib-only"
+        else
+            warn "buildtree_steam.py imports non-stdlib modules:"
+            echo "$third_party" | sed 's/^/         /'
+        fi
+    fi
+else
+    bad "python3 not in PATH"
+fi
+
+# ---------- 4. build_steam.sh -s ----------
+if [ -x "$BUILD_SH" ]; then
+    if out=$("$BUILD_SH" -s 2>/dev/null); then
+        if [ "$out" = "$CONFIG_JSON" ] || [ -f "$out" ]; then
+            ok "build_steam.sh -s → $out"
+        else
+            warn "build_steam.sh -s returned unexpected: $out"
+        fi
+    else
+        bad "build_steam.sh -s failed"
+    fi
+fi
+
+# ---------- 5. config.json + music root ----------
+MUSIC_ROOT=""
+if [ ! -f "$CONFIG_JSON" ]; then
+    bad "config.json missing: $CONFIG_JSON"
+else
+    if command -v jq >/dev/null 2>&1; then
+        if jq -e . "$CONFIG_JSON" >/dev/null 2>&1; then
+            root=$(jq -r '.root // ""' "$CONFIG_JSON")
+            if [ -n "$root" ]; then
+                # expand ~ if present
+                case "$root" in
+                    "~"*) root="${HOME}${root#\~}" ;;
+                esac
+                if [ -d "$root" ]; then
+                    n=$(find "$root" -type f \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' \
+                            -o -iname '*.wav' -o -iname '*.ogg' -o -iname '*.opus' \
+                            -o -iname '*.aac'  -o -iname '*.wma' -o -iname '*.m4b' -o -iname '*.mp4' \) \
+                            2>/dev/null | wc -l | tr -d ' ')
+                    ok "config.json root: $root ($n audio file(s))"
+                    MUSIC_ROOT="$root"
+                else
+                    warn "config.json root is not a directory: $root"
+                    # fall through to Steam defaults
+                fi
+            else
+                bad "config.json has empty 'root'"
+            fi
+        else
+            bad "config.json is not valid JSON"
+        fi
+    else
+        warn "jq not available, skipping config.json validation"
+    fi
+
+    # If configured root didn't resolve, try Steam defaults (matches python logic)
+    if [ -z "$MUSIC_ROOT" ]; then
+        for cand in "${STEAM_DEFAULTS[@]}"; do
+            if [ -d "$cand" ]; then
+                n=$(find "$cand" -type f \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' \
+                        -o -iname '*.wav' -o -iname '*.ogg' -o -iname '*.opus' \
+                        -o -iname '*.aac'  -o -iname '*.wma' -o -iname '*.m4b' -o -iname '*.mp4' \) \
+                        2>/dev/null | wc -l | tr -d ' ')
+                ok "fallback Steam root: $cand ($n audio file(s))"
+                MUSIC_ROOT="$cand"
+                break
+            fi
+        done
+        if [ -z "$MUSIC_ROOT" ]; then
+            bad "no usable music root (config.json root + Steam defaults all missing)"
+        fi
+    fi
+fi
+
+# ---------- 6. tree.json ----------
+if [ -f "$TREE_JSON" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        if jq -e 'type == "array"' "$TREE_JSON" >/dev/null 2>&1; then
+            groups=$(jq 'length' "$TREE_JSON" 2>/dev/null)
+            songs=$(jq '[.[].titles[].tabs[].items[]] | length' "$TREE_JSON" 2>/dev/null)
+            ok "tree.json valid ($groups group(s), $songs song(s))"
+
+            # Check that scheme is "steam" throughout (this is the steam variant)
+            wrong_scheme=$(jq '[.[].titles[].tabs[].items[] | select(.scheme != "steam")] | length' "$TREE_JSON" 2>/dev/null)
+            if [ "$wrong_scheme" = "0" ]; then
+                ok "all items use scheme 'steam'"
+            else
+                warn "$wrong_scheme item(s) have non-steam scheme"
+            fi
+        else
+            bad "tree.json is not a JSON array"
+        fi
+    else
+        info "jq not available, skipping tree.json validation"
+    fi
+else
+    info "tree.json not yet generated (run build_steam.sh)"
+fi
+
+# ---------- 7. TUI sibling ----------
+if [ -L "$TUI_LINK" ]; then
+    if [ -e "$TUI_LINK" ]; then
+        ok "bili_select_song_tui → $(readlink "$TUI_LINK")"
+    else
+        bad "bili_select_song_tui is a broken symlink → $(readlink "$TUI_LINK")"
+    fi
+elif [ -d "$TUI_LINK" ]; then
+    warn "bili_select_song_tui is a real directory, not a symlink"
+else
+    warn "bili_select_song_tui missing (optional sibling)"
+fi
+
+TUI_BIN="$TUI_LINK/cmd/tui/tui"
+if [ -x "$TUI_BIN" ]; then
+    size=$(stat -c%s "$TUI_BIN" 2>/dev/null || echo 0)
+    ok "TUI binary present via symlink ($size bytes)"
+else
+    bad "TUI binary not built: $TUI_BIN"
+    echo ""
+    echo "  Please build it yourself:"
+    echo "      cd $SELF_DIR/bili_select_song_tui"
+    echo "      go build -o cmd/tui/tui ./cmd/tui"
+    echo ""
+    exit 1
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

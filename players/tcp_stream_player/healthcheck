@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for the tcp_stream_player pipeline
+#
+# Components:
+#   bin/receiver          ffmpeg segmenter (stdin → /tmp/ts_stream/*.ts)
+#   launch_transmitter    directory watcher → FIFO (local) or HTTP POST (remote)
+#   local/tcp_stream_player   Go HTTP server (reads stdin, serves /stream)
+#   input_server.py       HTTP ingest → /tmp/ts_stream/*.ts
+#
+# Usage:
+#   ./healthcheck                 # full check
+#   ./healthcheck --no-go         # skip Go build/run checks
+#   ./healthcheck --no-network    # skip remote source probes
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+RECEIVER="$SELF_DIR/bin/receiver"
+LAUNCHER="$SELF_DIR/launch_transmitter"
+INPUT_SERVER="$SELF_DIR/input_server.py"
+SOURCE_LIST="$SELF_DIR/source_list.txt"
+GO_SRC="$SELF_DIR/local/main.go"
+GO_MOD="$SELF_DIR/local/go.mod"
+GO_BIN="$SELF_DIR/local/tcp_stream_player"
+WEB_INDEX="$SELF_DIR/local/web/index.html"
+
+TS_DIR="${TS_DIR:-/tmp/ts_stream}"
+FIFO="/tmp/tcp_stream_player.fifo"
+
+# ---------- flags ----------
+WANT_GO=1
+WANT_NETWORK=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-go)      WANT_GO=0 ;;
+        --no-network) WANT_NETWORK=0 ;;
+        -h|--help)
+            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *) echo "unknown flag: $arg" >&2; exit 2 ;;
+    esac
+done
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0; FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "dir: $SELF_DIR"
+
+# ---------- 1. files ----------
+[ -f "$RECEIVER" ]     && ok "bin/receiver present"        || bad "bin/receiver missing"
+[ -x "$RECEIVER" ]     && ok "bin/receiver executable"     || bad "bin/receiver not executable"
+
+[ -f "$LAUNCHER" ]     && ok "launch_transmitter present"  || bad "launch_transmitter missing"
+[ -x "$LAUNCHER" ]     && ok "launch_transmitter executable" || bad "launch_transmitter not executable"
+
+[ -f "$INPUT_SERVER" ] && ok "input_server.py present"     || warn "input_server.py missing (optional)"
+
+[ -f "$GO_SRC" ]       && ok "local/main.go present"       || bad "local/main.go missing"
+[ -f "$GO_MOD" ]       && ok "local/go.mod present"        || bad "local/go.mod missing"
+[ -f "$WEB_INDEX" ]    && ok "local/web/index.html present" || warn "local/web/index.html missing (go:embed will fail)"
+
+# ---------- 2. external tools ----------
+for tool in bash ffmpeg curl mkfifo stat date; do
+    command -v "$tool" >/dev/null 2>&1 && ok "$tool available" || bad "$tool not found in PATH"
+done
+command -v python3 >/dev/null 2>&1 && ok "python3 available" || warn "python3 not in PATH (input_server.py needs it)"
+
+if [ "$WANT_GO" -eq 1 ]; then
+    command -v go >/dev/null 2>&1 && ok "go available" || warn "go not in PATH (can't rebuild tcp_stream_player)"
+fi
+
+# ---------- 3. receiver sanity ----------
+if grep -q 'segment_format mpegts' "$RECEIVER" 2>/dev/null; then
+    ok "receiver uses MPEG-TS segment format"
+else
+    warn "receiver does not mention 'segment_format mpegts'"
+fi
+if grep -q 'pipe:0' "$RECEIVER" 2>/dev/null; then
+    ok "receiver reads stdin"
+else
+    warn "receiver does not read stdin"
+fi
+
+# ---------- 4. source_list.txt ----------
+if [ ! -f "$SOURCE_LIST" ]; then
+    bad "source_list.txt missing: $SOURCE_LIST"
+    SOURCE=""
+else
+    SOURCE=$(grep -v '^\s*#' "$SOURCE_LIST" 2>/dev/null | grep -v '^\s*$' | head -n 1 | tr -d '\r')
+    if [ -z "$SOURCE" ]; then
+        bad "source_list.txt has no usable first line"
+    else
+        ok "source_list.txt first line: $SOURCE"
+        case "$SOURCE" in
+            local) ok "source mode: local (FIFO + Go server)" ;;
+            http://*|https://*)
+                ok "source mode: remote HTTP"
+                if [ "$WANT_NETWORK" -eq 1 ]; then
+                    if curl -fsS --max-time 5 -o /dev/null "${SOURCE%/}" 2>/dev/null; then
+                        ok "remote base reachable: $SOURCE"
+                    else
+                        warn "remote base unreachable (may be offline): $SOURCE"
+                    fi
+                fi
+                ;;
+            *) warn "unknown source format: $SOURCE" ;;
+        esac
+    fi
+fi
+
+# ---------- 5. Go binary ----------
+if [ "$WANT_GO" -eq 1 ]; then
+    if [ -x "$GO_BIN" ]; then
+        ok "tcp_stream_player binary exists (built)"
+        if file "$GO_BIN" 2>/dev/null | grep -q 'ELF'; then
+            ok "tcp_stream_player is an ELF binary"
+        else
+            warn "tcp_stream_player not recognized as ELF"
+        fi
+    else
+        warn "tcp_stream_player not built yet"
+        if command -v go >/dev/null 2>&1 && [ -f "$GO_MOD" ]; then
+            info "attempting to build (go build -o tcp_stream_player)"
+            if (cd "$SELF_DIR/local" && go build -o tcp_stream_player . >/tmp/hc_go_build.log 2>&1); then
+                ok "go build succeeded"
+            else
+                bad "go build failed — see /tmp/hc_go_build.log"
+            fi
+        fi
+    fi
+fi
+
+# ---------- 6. tmp dirs / FIFO ----------
+if [ -d "$TS_DIR" ]; then
+    if [ -w "$TS_DIR" ]; then
+        n=$(ls -1 "$TS_DIR"/*.ts 2>/dev/null | wc -l | tr -d ' ')
+        ok "TS dir writable: $TS_DIR ($n .ts file(s) present)"
+    else
+        bad "TS dir not writable: $TS_DIR"
+    fi
+else
+    parent="$(dirname -- "$TS_DIR")"
+    [ -w "$parent" ] && ok "TS dir will be created under $parent" \
+                     || warn "TS dir missing and $parent not writable"
+fi
+
+if [ -p "$FIFO" ]; then
+    ok "FIFO exists: $FIFO"
+elif [ -e "$FIFO" ]; then
+    bad "$FIFO exists but is not a FIFO"
+else
+    info "FIFO not created yet (launch_transmitter creates it in local mode)"
+fi
+
+# ---------- 7. end-to-end local pipeline (if safe) ----------
+# Only run the full pipeline if:
+#   - source is "local"
+#   - the Go binary exists
+#   - no real pipeline is already running (FIFO has no reader)
+# We do a very short test: 0.2s of silence → receiver → wait for a .ts file.
+if [ "$SOURCE" = "local" ] && [ -x "$GO_BIN" ] && command -v ffmpeg >/dev/null 2>&1; then
+    # Skip if FIFO already has a reader (i.e. a real pipeline is running)
+    if [ -p "$FIFO" ] && command -v fuser >/dev/null 2>&1 && fuser "$FIFO" >/dev/null 2>&1; then
+        info "skipping e2e test (FIFO already has a reader)"
+    else
+        info "e2e: feeding 0.3s silence through bin/receiver"
+        tmp_before=$(ls -1 "$TS_DIR"/*.ts 2>/dev/null | wc -l | tr -d ' ')
+
+        # give receiver a quiet stdin so it exits when ffmpeg finishes
+        ffmpeg -v 0 -f lavfi -i anullsrc=r=44100:cl=mono -t 0.3 -f wav - 2>/dev/null \
+            | "$RECEIVER" >/dev/null 2>&1 || true
+
+        # receiver uses -re + segment_time 2, so a 0.3s clip may not flush a
+        # full segment immediately; wait briefly for the file to appear.
+        for _ in $(seq 1 10); do
+            tmp_after=$(ls -1 "$TS_DIR"/*.ts 2>/dev/null | wc -l | tr -d ' ')
+            [ "$tmp_after" -gt "$tmp_before" ] && break
+            sleep 0.2
+        done
+
+        if [ "$tmp_after" -gt "$tmp_before" ]; then
+            newfile=$(ls -t "$TS_DIR"/*.ts 2>/dev/null | head -n1)
+            size=$(stat -c%s "$newfile" 2>/dev/null || echo 0)
+            ok "receiver produced $newfile ($size bytes)"
+            # clean up just the file we produced
+            rm -f "$newfile"
+        else
+            warn "receiver produced no new .ts file within ~2s (may need a longer input)"
+        fi
+    fi
+else
+    info "skipping e2e test (source=$SOURCE, go_bin=$([ -x "$GO_BIN" ] && echo yes || echo no))"
+fi
+
+# ---------- 8. input_server.py syntax ----------
+if [ -f "$INPUT_SERVER" ] && command -v python3 >/dev/null 2>&1; then
+    if python3 -m py_compile "$INPUT_SERVER" 2>/dev/null; then
+        ok "input_server.py compiles"
+    else
+        bad "input_server.py has a syntax error"
+    fi
+fi
+
+# ---------- 9. Go HTTP smoke test ----------
+# Start the Go binary in the background with a tiny stdin, hit /stream,
+# and verify it responds with the expected Content-Type. Then kill it.
+if [ "$WANT_GO" -eq 1 ] && [ -x "$GO_BIN" ]; then
+    TEST_PORT=18923
+    info "starting tcp_stream_player on :$TEST_PORT for HTTP smoke test"
+    # feed a tiny payload and let the server see EOF, which triggers Close()
+    ( printf 'x' | "$GO_BIN" -listen ":$TEST_PORT" -type "video/mp2t" \
+        >/tmp/hc_go_run.log 2>&1 ) &
+    GO_PID=$!
+    sleep 0.5
+
+    if command -v curl >/dev/null 2>&1; then
+        # / returns HTML
+        if curl -fsS --max-time 2 "http://127.0.0.1:$TEST_PORT/" 2>/dev/null | grep -qi '<html'; then
+            ok "Go server serves index HTML"
+        else
+            warn "Go server / did not return HTML"
+        fi
+
+        # /stream headers: Content-Type should be video/mp2t
+        ct=$(curl -sS --max-time 2 -o /dev/null -D - "http://127.0.0.1:$TEST_PORT/stream" 2>/dev/null \
+                | awk -F': ' 'tolower($1)=="content-type" {print $2; exit}' | tr -d '\r')
+        if [ "$ct" = "video/mp2t" ]; then
+            ok "Go server /stream Content-Type: $ct"
+        elif [ -n "$ct" ]; then
+            warn "Go server /stream Content-Type was '$ct' (expected video/mp2t)"
+        else
+            warn "Go server /stream returned no Content-Type"
+        fi
+    fi
+
+    kill "$GO_PID" 2>/dev/null
+    wait "$GO_PID" 2>/dev/null
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

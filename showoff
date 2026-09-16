@@ -1,0 +1,59 @@
+#!/bin/bash
+# 将所有配置文件内容合并到一个 txt 文件
+
+OUTPUT_FILE="$HOME/fastfetch.txt"
+
+tree -L 5 > $OUTPUT_FILE
+
+# 配置列表（目录和文件）
+CONFIGS=(
+	"./LICENSE"
+	"./launch"
+	"./kernel/head"
+	"./kernel/lib/listen_control.py"
+	"./players/ffplay/bin/ffplay"
+	"./players/tcp_stream_player/bin/receiver"
+	"./players/tcp_stream_player/launch_transmitter"
+	"./players/tcp_stream_player/local/main.go"
+	"./players/tcp_stream_player/local/web/index.html"
+	"./players/tcp_stream_player/input_server.py"
+	"./to_be_played/loop_list/example.json"
+	"./user_interfaces/fakehexwithascii/bin/fakehexwithascii.py"
+	"./data_sources/bilicache/bin/bilicache.py"
+	"./data_sources/biliweb/bin/biliweb.py"
+	"./data_sources/steam/bin/steam.py"
+	"./gateway/gateway.sh"
+	"./gateway/gateway_daemon.py"
+	"./song_adders/bili_cache_select_song/buildtree/src/main.rs"
+	"./song_adders/bili_web_select_song/buildtree_web/build_web.sh"
+	"./song_adders/bili_web_select_song/buildtree_web/buildtree_web_walker.py"
+	"./song_adders/bili_web_select_song/buildtree_web/buildtree_web_json.py"
+	"./song_adders/bili_select_song_tui/cmd/tui/main.go"
+	"./song_adders/bili_select_song_tui/easy_edit.sh"
+	"./choose_song"
+)
+
+for path in "${CONFIGS[@]}"; do
+    if [[ -f "$path" ]]; then
+        # 是文件，直接 cat
+        echo "========================================" >> "$OUTPUT_FILE"
+        echo "FILE: $path" >> "$OUTPUT_FILE"
+        echo "========================================" >> "$OUTPUT_FILE"
+        sudo cat "$path" >> "$OUTPUT_FILE"
+        echo "" >> "$OUTPUT_FILE"
+    elif [[ -d "$path" ]]; then
+        # 是目录，遍历所有文件
+        find "$path" -type f | while read -r file; do
+            echo "========================================" >> "$OUTPUT_FILE"
+            echo "FILE: $file" >> "$OUTPUT_FILE"
+            echo "========================================" >> "$OUTPUT_FILE"
+            sudo cat "$file" >> "$OUTPUT_FILE"
+            echo "" >> "$OUTPUT_FILE"
+        done
+    else
+        echo "SKIP: $path (not found)" >> "$OUTPUT_FILE"
+    fi
+done
+
+echo "Done: $OUTPUT_FILE"
+echo "Size: $(du -h "$OUTPUT_FILE" | cut -f1)"

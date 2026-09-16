@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for the ayaplayer kernel (scheduler + control)
+#
+# Usage:
+#   ./healthcheck                 # full check (read-only)
+#   ./healthcheck --no-dbus       # skip DBus session bus checks
+#   ./healthcheck --no-plugins    # skip plugin discovery/--canwork checks
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+# The kernel's entry point. `head` is a symlink to the current `listplayN`.
+HEAD="$SELF_DIR/head"
+LIB_LISTEN="$SELF_DIR/lib/listen_control.py"
+
+# Paths the kernel resolves relative to itself:
+PLAYLIST_FILE="$SELF_DIR/../to_be_played/playlist.json"
+DATA_SOURCE_GLOB="$SELF_DIR/../data_sources/*/bin"
+PLAYER_DIR="$SELF_DIR/../players/default"
+GATEWAY="$SELF_DIR/../gateway/gateway.sh"
+
+# DBus names used by the scheduler
+BUS_NAME="com.ayaplayer"
+OBJECT_PATH="/com/ayaplayer/Status"
+CONTROL_PATH="/com/ayaplayer/Control"
+INTERFACE="com.ayaplayer.Interface"
+
+# ---------- flags ----------
+WANT_DBUS=1
+WANT_PLUGINS=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-dbus)    WANT_DBUS=0 ;;
+        --no-plugins) WANT_PLUGINS=0 ;;
+        -h|--help)
+            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *) echo "unknown flag: $arg" >&2; exit 2 ;;
+    esac
+done
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0; FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "kernel dir: $SELF_DIR"
+
+# ---------- 1. entry point ----------
+if [ ! -e "$HEAD" ]; then
+    bad "entry point missing: $HEAD"
+    exit 1
+fi
+if [ -L "$HEAD" ]; then
+    target="$(readlink "$HEAD")"
+    if [ -e "$HEAD" ]; then
+        ok "head → $target"
+    else
+        bad "head is a broken symlink → $target"
+    fi
+else
+    warn "head is not a symlink (expected → listplayN)"
+fi
+[ -x "$HEAD" ] && ok "head executable" || bad "head not executable"
+
+# ---------- 2. lib ----------
+if [ -f "$LIB_LISTEN" ]; then
+    ok "lib/listen_control.py present"
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import dbus, gi; from gi.repository import GLib' 2>/dev/null; then
+            ok "python3 dbus + GLib importable"
+        else
+            bad "python3 cannot import dbus / gi.repository.GLib"
+        fi
+    fi
+else
+    bad "lib/listen_control.py missing: $LIB_LISTEN"
+fi
+
+# ---------- 3. external tools ----------
+for tool in bash jq dbus-send setsid ps; do
+    command -v "$tool" >/dev/null 2>&1 && ok "$tool available" || bad "$tool not found in PATH"
+done
+
+# ---------- 4. DBus session bus ----------
+if [ "$WANT_DBUS" -eq 1 ]; then
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        warn "DBUS_SESSION_BUS_ADDRESS not set (kernel needs a session bus)"
+    else
+        ok "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+    fi
+
+    # Can we talk to the bus at all?
+    if dbus-send --session --dest=org.freedesktop.DBus \
+            --type=method_call --print-reply \
+            /org/freedesktop/DBus org.freedesktop.DBus.ListNames \
+            >/dev/null 2>&1; then
+        ok "session bus reachable"
+    else
+        bad "session bus not reachable (dbus-send failed)"
+    fi
+
+    # Optional: is ayaplayer already running / owning the name?
+    if dbus-send --session --dest=org.freedesktop.DBus \
+            --type=method_call --print-reply \
+            /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
+            "string:$BUS_NAME" 2>/dev/null | grep -q 'true'; then
+        ok "bus name owned: $BUS_NAME"
+    else
+        info "bus name $BUS_NAME has no owner yet (kernel not running)"
+    fi
+
+    # Can we emit a harmless signal on the expected interface?
+    if dbus-send --session --type=signal \
+            "$CONTROL_PATH" "$INTERFACE.Control" \
+            "string:hc_probe" "string:$$" >/dev/null 2>&1; then
+        ok "can emit signals on $INTERFACE.Control"
+    else
+        bad "cannot emit signals on $INTERFACE.Control"
+    fi
+fi
+
+# ---------- 5. playlist source ----------
+if [ -f "$PLAYLIST_FILE" ]; then
+    if [ -s "$PLAYLIST_FILE" ]; then
+        n=$(wc -l < "$PLAYLIST_FILE" 2>/dev/null | tr -d ' ')
+        ok "playlist present: $PLAYLIST_FILE ($n lines)"
+        # every line should parse as JSON
+        bad_json=0
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "$line" | jq -e . >/dev/null 2>&1 || bad_json=$((bad_json+1))
+        done < "$PLAYLIST_FILE"
+        if [ "$bad_json" -eq 0 ]; then
+            ok "all playlist lines are valid JSON"
+        else
+            warn "$bad_json playlist line(s) are not valid JSON"
+        fi
+    else
+        info "playlist exists but empty: $PLAYLIST_FILE"
+    fi
+else
+    warn "playlist not found: $PLAYLIST_FILE (kernel waits for it)"
+fi
+
+# ---------- 6. gateway (used for getnext/finish) ----------
+if [ -x "$GATEWAY" ]; then
+    if out=$("$GATEWAY" count 2>/dev/null); then
+        ok "gateway count → $out"
+    else
+        warn "gateway count failed (source may be empty)"
+    fi
+else
+    bad "gateway not executable: $GATEWAY"
+fi
+
+# ---------- 7. player dir ----------
+if [ -d "$PLAYER_DIR" ]; then
+    if [ -n "$(ls -A "$PLAYER_DIR/bin" 2>/dev/null)" ]; then
+        n=$(ls -1 "$PLAYER_DIR/bin" 2>/dev/null | wc -l | tr -d ' ')
+        ok "player dir has $n binary(ies) under bin/"
+    else
+        bad "player dir has no binaries: $PLAYER_DIR/bin"
+    fi
+else
+    bad "player dir missing: $PLAYER_DIR"
+fi
+
+# ---------- 8. plugin discovery ----------
+if [ "$WANT_PLUGINS" -eq 1 ]; then
+    found_any=0
+    for provider in $DATA_SOURCE_GLOB/*; do
+        [ -x "$provider" ] || continue
+        found_any=1
+        name="$(basename "$provider")"
+        support="$( "$provider" --support 2>/dev/null || true )"
+        if [ -n "$support" ]; then
+            ok "plugin $name --support → $support"
+        else
+            warn "plugin $name --support returned nothing"
+        fi
+        # --canwork needs a real JSON item; just check the command exists and
+        # doesn't crash on bad input (it should exit non-zero, not segfault)
+        rc=0
+        "$provider" --canwork '{}' >/dev/null 2>&1 || rc=$?
+        case "$rc" in
+            0|1) ok "plugin $name --canwork runs (rc=$rc)" ;;
+            *)   warn "plugin $name --canwork crashed (rc=$rc)" ;;
+        esac
+    done
+    [ "$found_any" -eq 1 ] || bad "no executable plugins under $DATA_SOURCE_GLOB"
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

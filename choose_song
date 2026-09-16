@@ -173,7 +173,7 @@ main() {
             'G')
                 selected=$((total - 1))
                 ;;
-            ''|$'\n'|$'\r')
+            'a'|''|$'\n'|$'\r')
                 # Enter：运行
                 local name="${sources[$selected]}"
                 local dir="$SCRIPT_DIR/song_adders/$name"

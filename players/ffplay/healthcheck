@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for the ffplay player wrapper
+#
+# Usage:
+#   ./healthcheck
+#
+# Assumes layout:
+#   <script_dir>/bin/<wrapper>     (single regular file)
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+BIN_DIR="$SELF_DIR/bin"
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0; FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "base dir: $SELF_DIR"
+
+# ---------- 1. find the wrapper in bin/ ----------
+if [ ! -d "$BIN_DIR" ]; then
+    bad "bin/ directory missing: $BIN_DIR"
+    exit 1
+fi
+
+CANDIDATES=()
+while IFS= read -r -d '' f; do
+    base="$(basename -- "$f")"
+    case "$base" in
+        .*|*.bak|*.log|*.tmp|*.swp|*~) continue ;;
+    esac
+    CANDIDATES+=("$f")
+done < <(find "$BIN_DIR" -maxdepth 1 -type f -print0 2>/dev/null)
+
+if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+    bad "no wrapper found in $BIN_DIR"
+    exit 1
+fi
+
+if [ "${#CANDIDATES[@]}" -gt 1 ]; then
+    warn "multiple files in bin/, picking the first one:"
+    for f in "${CANDIDATES[@]}"; do info "  - $f"; done
+fi
+
+WRAPPER="${CANDIDATES[0]}"
+info "wrapper: $WRAPPER"
+
+# ---------- 2. wrapper sanity ----------
+[ -x "$WRAPPER" ] && ok "wrapper executable" || bad "wrapper not executable"
+
+if head -n1 "$WRAPPER" 2>/dev/null | grep -q '^#!/.*bash'; then
+    ok "wrapper has bash shebang"
+else
+    warn "wrapper does not start with a bash shebang"
+fi
+
+# It should exec ffplay (that's the whole point)
+if grep -q 'exec ffplay' "$WRAPPER" 2>/dev/null; then
+    ok "wrapper execs ffplay"
+else
+    warn "wrapper does not contain 'exec ffplay'"
+fi
+
+# It should read from stdin (pipe:0)
+if grep -q 'pipe:0' "$WRAPPER" 2>/dev/null; then
+    ok "wrapper reads from stdin (pipe:0)"
+else
+    warn "wrapper does not reference pipe:0"
+fi
+
+# ---------- 3. ffplay availability ----------
+if command -v ffplay >/dev/null 2>&1; then
+    if ver=$(ffplay -version 2>/dev/null | head -n1); then
+        ok "ffplay available ($ver)"
+    else
+        bad "ffplay present but not runnable"
+    fi
+else
+    bad "ffplay not found in PATH"
+fi
+
+# Optional: ffmpeg too, since most pipelines produce audio with it,
+# but the wrapper itself only needs ffplay.
+command -v ffmpeg >/dev/null 2>&1 && ok "ffmpeg available" || warn "ffmpeg not in PATH (not required by wrapper)"
+
+# ---------- 4. smoke test with a generated tone ----------
+# Feed 0.5s of silence through ffmpeg → wrapper, expect a clean exit.
+# Requires ffmpeg to generate input; skip if not present.
+if command -v ffmpeg >/dev/null 2>&1 && command -v ffplay >/dev/null 2>&1; then
+    info "smoke test: piping 0.5s silence through the wrapper"
+    set +e
+    ffmpeg -v 0 -f lavfi -i anullsrc=r=44100:cl=mono -t 0.5 -f wav - 2>/dev/null \
+        | SDL_AUDIODRIVER=dummy "$WRAPPER" >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+        ok "wrapper handled a 0.5s stream (rc=0)"
+    else
+        warn "wrapper exited rc=$rc during smoke test"
+    fi
+else
+    warn "skipping smoke test (need ffmpeg + ffplay)"
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

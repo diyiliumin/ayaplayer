@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# healthcheck - Health check for bili_web_select_song
+#
+# Checks:
+#   1. run entry point
+#   2. buildtree_web/ python scripts exist & compile
+#   3. python deps: requests, bs4
+#   4. build_web.sh -s mode returns urls.txt path
+#   5. urls.txt present
+#   6. bili_select_song_tui symlink resolves
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = one or more checks failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+RUN="$SELF_DIR/run"
+WEB_DIR="$SELF_DIR/buildtree_web"
+BUILD_WEB="$WEB_DIR/build_web.sh"
+URLS="$WEB_DIR/urls.txt"
+RESULTS="$WEB_DIR/results.json"
+WALKER="$WEB_DIR/buildtree_web_walker.py"
+JSON_SCRIPT="$WEB_DIR/buildtree_web_json.py"
+TUI_LINK="$SELF_DIR/bili_select_song_tui"
+
+# ---------- colors ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+PASS=0; FAIL=0
+
+ok()   { printf '%s[ OK ]%s %s\n'   "$GREEN"  "$NC" "$1"; PASS=$((PASS+1)); }
+bad()  { printf '%s[FAIL]%s %s\n'   "$RED"    "$NC" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '%s[WARN]%s %s\n'   "$YELLOW" "$NC" "$1"; }
+info() { printf '[INFO] %s\n' "$1"; }
+
+info "base dir: $SELF_DIR"
+
+# ---------- 1. run entry point ----------
+if [ -f "$RUN" ]; then
+    ok "run present"
+    [ -x "$RUN" ] && ok "run executable" || bad "run not executable"
+else
+    bad "run missing: $RUN"
+fi
+
+# ---------- 2. python scripts ----------
+PY_OK=1
+for py in "$WALKER" "$JSON_SCRIPT" "$WEB_DIR/buildtree_web.py" \
+          "$WEB_DIR/buildtree_web_js.py" "$WEB_DIR/buildtree_web_json.py"; do
+    [ -f "$py" ] || continue
+    name="buildtree_web/$(basename "$py")"
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -m py_compile "$py" 2>/dev/null; then
+            ok "$name compiles"
+        else
+            bad "$name has a syntax error"
+            PY_OK=0
+        fi
+    fi
+done
+[ -f "$WALKER" ] || bad "buildtree_web_walker.py missing"
+[ -f "$JSON_SCRIPT" ] || bad "buildtree_web_json.py missing"
+
+# ---------- 3. python deps ----------
+if command -v python3 >/dev/null 2>&1; then
+    for mod in requests bs4; do
+        if python3 -c "import $mod" 2>/dev/null; then
+            ok "python3 can import $mod"
+        else
+            bad "python3 cannot import $mod (pip install $mod)"
+        fi
+    done
+else
+    bad "python3 not in PATH"
+fi
+
+# ---------- 4. build_web.sh -s mode ----------
+if [ -f "$BUILD_WEB" ]; then
+    ok "build_web.sh present"
+    [ -x "$BUILD_WEB" ] && ok "build_web.sh executable" || bad "build_web.sh not executable"
+    if out=$("$BUILD_WEB" -s 2>/dev/null); then
+        if [ "$out" = "$URLS" ] || [ -f "$out" ]; then
+            ok "build_web.sh -s → $out"
+        else
+            warn "build_web.sh -s returned unexpected: $out"
+        fi
+    else
+        bad "build_web.sh -s failed"
+    fi
+else
+    bad "build_web.sh missing: $BUILD_WEB"
+fi
+
+# ---------- 5. urls.txt ----------
+if [ -f "$URLS" ]; then
+    n=$(grep -cv '^\s*#\|^\s*$' "$URLS" 2>/dev/null | tr -d ' ')
+    if [ "$n" -gt 0 ]; then
+        ok "urls.txt present ($n URL(s))"
+    else
+        warn "urls.txt present but empty"
+    fi
+else
+    warn "urls.txt missing (walker will fail without it)"
+fi
+
+# ---------- 6. TUI symlink ----------
+if [ -L "$TUI_LINK" ]; then
+    if [ -e "$TUI_LINK" ]; then
+        ok "bili_select_song_tui → $(readlink "$TUI_LINK")"
+    else
+        bad "bili_select_song_tui is a broken symlink → $(readlink "$TUI_LINK")"
+    fi
+elif [ -d "$TUI_LINK" ]; then
+    warn "bili_select_song_tui is a real directory, not a symlink"
+else
+    warn "bili_select_song_tui missing (optional sibling)"
+fi
+
+# ---------- 7. TUI binary (through the symlink) ----------
+TUI_BIN="$TUI_LINK/cmd/tui/tui"
+if [ -x "$TUI_BIN" ]; then
+    size=$(stat -c%s "$TUI_BIN" 2>/dev/null || echo 0)
+    ok "TUI binary present via symlink ($size bytes)"
+else
+    bad "TUI binary not built: $TUI_BIN"
+    echo ""
+    echo "  Please build it yourself:"
+    echo "      cd $SELF_DIR/bili_select_song_tui"
+    echo "      go build -o cmd/tui/tui ./cmd/tui"
+    echo ""
+    exit 1
+fi
+
+# ---------- 8. results.json (optional, informative) ----------
+if [ -f "$RESULTS" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        if jq -e . "$RESULTS" >/dev/null 2>&1; then
+            n=$(jq 'length' "$RESULTS" 2>/dev/null)
+            ok "results.json valid ($n entr(ies))"
+        else
+            warn "results.json is not valid JSON"
+        fi
+    fi
+else
+    info "results.json not yet generated"
+fi
+
+# ---------- summary ----------
+echo
+printf 'Summary: %s%d passed%s, %s%d failed%s\n' \
+    "$GREEN" "$PASS" "$NC" \
+    "$RED"   "$FAIL" "$NC"
+
+[ "$FAIL" -eq 0 ]

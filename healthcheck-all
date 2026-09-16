@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+#
+# healthcheck-all - Run every healthcheck in the biliCLI tree and report
+#
+# Usage:
+#   ./healthcheck-all [ROOT]
+#
+# ROOT defaults to the parent of this script's directory if this script
+# lives at the top of the tree, otherwise it defaults to the current dir.
+#
+# Behavior:
+#   - detects OS + version
+#   - builds a tree of every `healthcheck` file under ROOT
+#   - runs each one, captures stdout+stderr+exit code
+#   - writes a report to /tmp/biliCLI_healthcheck_<timestamp>.txt
+#   - opens the report in $EDITOR (nvim → vim → nano)
+#
+# Exit code: 0 if all passed, 1 if any failed
+#
+
+set -u
+
+# ---------- locate ourselves ----------
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    dir="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+        /*) ;;
+        *) SELF="$dir/$SELF" ;;
+    esac
+done
+SELF_DIR="$(cd -P "$(dirname -- "$SELF")" && pwd)"
+
+# ---------- root ----------
+if [ "$#" -ge 1 ]; then
+    ROOT="$1"
+else
+    # If the script is named healthcheck-all and sits at the top of biliCLI,
+    # use its own dir. Otherwise walk up looking for a `gateway` or `kernel` dir.
+    if [ -d "$SELF_DIR/gateway" ] || [ -d "$SELF_DIR/kernel" ]; then
+        ROOT="$SELF_DIR"
+    else
+        ROOT="$SELF_DIR"
+    fi
+fi
+
+if [ ! -d "$ROOT" ]; then
+    echo "ROOT is not a directory: $ROOT" >&2
+    exit 2
+fi
+ROOT="$(cd -P "$ROOT" && pwd)"
+
+# ---------- output file ----------
+TS="$(date +%Y%m%d_%H%M%S)"
+REPORT="/tmp/biliCLI_healthcheck_${TS}.txt"
+
+# ---------- colors (report is plain, terminal gets color) ----------
+if [ -t 1 ]; then
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; CYAN=""; NC=""
+fi
+
+# tee-like helper: write to both stdout and report
+say() {
+    printf '%s\n' "$1" | tee -a "$REPORT" >/dev/null
+    printf '%s\n' "$1"
+}
+
+# ---------- OS info ----------
+os_name="unknown"
+os_version="unknown"
+os_kernel="$(uname -r 2>/dev/null || echo unknown)"
+os_arch="$(uname -m 2>/dev/null || echo unknown)"
+if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    os_name="${NAME:-unknown}"
+    os_version="${VERSION:-${VERSION_ID:-unknown}}"
+elif command -v sw_vers >/dev/null 2>&1; then
+    os_name="$(sw_vers -productName)"
+    os_version="$(sw_vers -productVersion)"
+fi
+
+# ---------- header ----------
+{
+    echo "======================================================================"
+    echo " biliCLI healthcheck report"
+    echo "======================================================================"
+    echo " timestamp : $TS"
+    echo " host      : $(hostname 2>/dev/null || echo unknown)"
+    echo " user      : ${USER:-unknown}"
+    echo " OS        : $os_name $os_version"
+    echo " kernel    : $os_kernel"
+    echo " arch      : $os_arch"
+    echo " shell     : ${SHELL:-unknown} ($BASH_VERSION)"
+    echo " root      : $ROOT"
+    echo "----------------------------------------------------------------------"
+    echo
+} > "$REPORT"
+
+say "======================================================================"
+say " biliCLI healthcheck"
+say "======================================================================"
+say " OS      : $os_name $os_version"
+say " kernel  : $os_kernel"
+say " arch    : $os_arch"
+say " root    : $ROOT"
+say " report  : $REPORT"
+say "======================================================================"
+say ""
+
+# ---------- collect healthchecks ----------
+# A "healthcheck" is any executable file named exactly 'healthcheck',
+# plus we also accept 'healthcheck-all' at root but skip it to avoid recursion.
+mapfile -t CHECKS < <(
+    find "$ROOT" -type f -name 'healthcheck' -perm -u+x 2>/dev/null | sort
+)
+
+# also catch non-executable healthchecks so we can flag them
+mapfile -t CHECKS_NOEXEC < <(
+    find "$ROOT" -type f -name 'healthcheck' ! -perm -u+x 2>/dev/null | sort
+)
+
+TOTAL_CHECKS="${#CHECKS[@]}"
+TOTAL_NOEXEC="${#CHECKS_NOEXEC[@]}"
+
+say "Found $TOTAL_CHECKS executable healthcheck(s)"
+if [ "$TOTAL_NOEXEC" -gt 0 ]; then
+    say "Found $TOTAL_NOEXEC non-executable healthcheck(s) (will be flagged)"
+fi
+say ""
+
+# ---------- tree ----------
+say "----------------------------------------------------------------------"
+say " Tree"
+say "----------------------------------------------------------------------"
+
+print_tree() {
+    local dir="$1"
+    local prefix="$2"
+    local entries
+    mapfile -t entries < <(find "$dir" -maxdepth 1 -mindepth 1 \
+        -not -name 'target' -not -name '.git' \
+        -not -name 'node_modules' -not -name '__pycache__' \
+        -printf '%f\n' 2>/dev/null | sort)
+
+    local n=${#entries[@]}
+    local i=0
+    for entry in "${entries[@]}"; do
+        i=$((i+1))
+        local path="$dir/$entry"
+        local branch="├── "
+        local cont="│   "
+        if [ "$i" -eq "$n" ]; then
+            branch="└── "
+            cont="    "
+        fi
+        if [ -d "$path" ] && [ ! -L "$path" ]; then
+            say "${prefix}${branch}${entry}/"
+            print_tree "$path" "${prefix}${cont}"
+        else
+            if [ -L "$path" ]; then
+                say "${prefix}${branch}${entry} -> $(readlink "$path")"
+            else
+                say "${prefix}${branch}${entry}"
+            fi
+        fi
+    done
+}
+
+# top-level entries
+mapfile -t TOP < <(find "$ROOT" -maxdepth 1 -mindepth 1 \
+    -not -name 'target' -not -name '.git' \
+    -not -name 'node_modules' -not -name '__pycache__' \
+    -printf '%f\n' 2>/dev/null | sort)
+n=${#TOP[@]}
+i=0
+for entry in "${TOP[@]}"; do
+    i=$((i+1))
+    path="$ROOT/$entry"
+    if [ "$i" -eq "$n" ]; then
+        branch="└── "; cont="    "
+    else
+        branch="├── "; cont="│   "
+    fi
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+        say "${branch}${entry}/"
+        print_tree "$path" "${cont}"
+    else
+        if [ -L "$path" ]; then
+            say "${branch}${entry} -> $(readlink "$path")"
+        else
+            say "${branch}${entry}"
+        fi
+    fi
+done
+say ""
+
+# ---------- run each healthcheck ----------
+say "----------------------------------------------------------------------"
+say " Results"
+say "----------------------------------------------------------------------"
+say ""
+
+TOTAL_PASS=0
+TOTAL_FAIL=0
+declare -a FAILED_PATHS
+
+# iterate in sorted order so the report is stable
+for hc in "${CHECKS[@]}"; do
+    rel="${hc#$ROOT/}"
+    dir="$(dirname -- "$hc")"
+
+    say "======================================================================"
+    say " CHECK: $rel"
+    say "======================================================================"
+
+    # run in the healthcheck's own dir so its relative paths resolve
+    set +e
+    out="$(cd "$dir" && ./healthcheck 2>&1)"
+    rc=$?
+    set -e
+
+    # print captured output, indented
+    printf '%s\n' "$out" | sed 's/^/  /' | tee -a "$REPORT" >/dev/null
+    printf '%s\n' "$out" | sed 's/^/  /'
+
+    if [ "$rc" -eq 0 ]; then
+        say ""
+        say "  >> RESULT: PASS (exit 0)"
+        TOTAL_PASS=$((TOTAL_PASS+1))
+    else
+        say ""
+        say "  >> RESULT: FAIL (exit $rc)"
+        TOTAL_FAIL=$((TOTAL_FAIL+1))
+        FAILED_PATHS+=("$rel")
+    fi
+    say ""
+done
+
+# flag non-executable ones too
+for hc in "${CHECKS_NOEXEC[@]}"; do
+    rel="${hc#$ROOT/}"
+    say "======================================================================"
+    say " CHECK: $rel  (NOT EXECUTABLE — skipped)"
+    say "======================================================================"
+    say "  >> RESULT: FAIL (chmod +x it and rerun)"
+    say ""
+    TOTAL_FAIL=$((TOTAL_FAIL+1))
+    FAILED_PATHS+=("$rel (not executable)")
+done
+
+# ---------- summary ----------
+say "======================================================================"
+say " Summary"
+say "======================================================================"
+say " OS              : $os_name $os_version""(i use arch btw)"
+say " kernel          : $os_kernel"
+say " arch            : $os_arch"
+say " total checks    : $((TOTAL_PASS + TOTAL_FAIL))"
+say " passed          : $TOTAL_PASS"
+say " failed          : $TOTAL_FAIL"
+say "======================================================================"
+say ""
+say " Report: $REPORT"
+
+# ---------- open in editor ----------
+EDITOR_BIN=""
+for e in "${EDITOR:-}" nvim vim nano; do
+    [ -z "$e" ] && continue
+    if command -v "$e" >/dev/null 2>&1; then
+        EDITOR_BIN="$e"
+        break
+    fi
+done
+
+if [ -n "$EDITOR_BIN" ] && [ -t 0 ] && [ -t 1 ]; then
+    echo ""
+    echo "Opening report in $EDITOR_BIN ..."
+    # only auto-open if interactive
+    "$EDITOR_BIN" "$REPORT"
+else
+    echo ""
+    echo "Not opening editor (non-interactive or no editor found)."
+    echo "Report at: $REPORT"
+fi
+
+[ "$TOTAL_FAIL" -eq 0 ]

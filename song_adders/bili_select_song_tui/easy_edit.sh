@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================
-# easyedit - 可视化编辑 playlist（带 delta 提交）
+# easyedit - 可视化编辑 playlist（双字段匹配）
 # 用法: ./easyedit.sh [--dry-run]
 # ============================================
 
@@ -43,24 +43,33 @@ TOTAL=$(wc -l < "$FULL_FILE")
 echo -e "${GREEN}✅ $TOTAL 首${NC}"
 
 # ============================================
-# 2. 建索引（title → JSON）
+# 2. 建索引（title + category → JSON）
 # ============================================
 echo -e "${CYAN}🔨 建索引...${NC}"
 
 jq -r -s '
     .[] | 
-    [(.title // ""), (tojson)] | 
+    [(.title // ""), (.category // ""), (tojson)] | 
     @tsv
 ' "$FULL_FILE" > "$INDEX_FILE"
 
 # ============================================
-# 3. 生成简化视图（只有 title）
+# 3. 生成简化视图（title @category）
 # ============================================
 echo -e "${CYAN}📝 生成视图...${NC}"
 
 awk -F'\t' '{
-    if ($1 == "") print $2
-    else print $1
+    title = $1
+    category = $2
+    json = $3
+
+    if (title == "") {
+        print json
+    } else if (category != "" && category != title) {
+        print title " @" category
+    } else {
+        print title
+    }
 }' "$INDEX_FILE" > "$EASY_FILE"
 
 # ============================================
@@ -68,7 +77,7 @@ awk -F'\t' '{
 # ============================================
 echo -e "${CYAN}✏️  打开编辑器...${NC}"
 echo -e "${YELLOW}   文件: $EASY_FILE${NC}"
-echo -e "${YELLOW}   提示: 每行是一个 title，删除=删歌，移动=调序${NC}"
+echo -e "${YELLOW}   提示: 格式为 'title @category'，删除=删歌，移动=调序${NC}"
 echo ""
 
 EDITOR="${EDITOR:-nvim}"
@@ -86,23 +95,47 @@ if [ ! -f "$EASY_FILE" ]; then
 fi
 
 # ============================================
-# 5. 匹配（awk 哈希表，O(n)）
+# 5. 匹配（title + category 双字段）
 # ============================================
 echo -e "${CYAN}🔄 匹配...${NC}"
 
 awk -F'\t' '
     NR == FNR {
-        if ($1 != "") map[$1] = $2
+        # 建索引：title + category 组合 key
+        if ($1 != "") {
+            map[$1 "\x1F" $2] = $3
+            # 备用：只用 title（记录第一个匹配）
+            if (!($1 in title_map)) {
+                title_map[$1] = $3
+            }
+        }
         next
     }
     $0 == "" || /^#/ { next }
     {
-        if ($0 in map) {
-            print map[$0]
+        line = $0
+        # 解析 "title @category"
+        at_pos = index(line, " @")
+        if (at_pos > 0) {
+            title = substr(line, 1, at_pos - 1)
+            category = substr(line, at_pos + 2)
+        } else {
+            title = line
+            category = ""
+        }
+
+        # 1. 用 title + category 精确匹配
+        key = title "\x1F" category
+        if (key in map) {
+            print map[key]
+            matched++
+        } else if (title in title_map) {
+            # 2. 回退：只用 title 匹配
+            print title_map[title]
             matched++
         } else {
             unmatched++
-            print "⚠️ 未匹配: " $0 > "/dev/stderr"
+            print "⚠️ 未匹配: " line > "/dev/stderr"
         }
     }
     END {
@@ -154,21 +187,19 @@ echo -e "${CYAN}📤 提交...${NC}"
 
 CONTENT=$(cat "$NEW_FILE")
 
-# ★★★ 用 write 一次性提交 ★★★
 if "$GATEWAY" write "$CONTENT" 2>/dev/null; then
     echo -e "${GREEN}✅ 已提交 $NEW_COUNT 首（bulk write）${NC}"
 else
-    # ★★★ 回退：clear + append ★★★
     echo -e "${YELLOW}   → write 失败，回退到 clear+append${NC}"
     "$GATEWAY" clear
-    
+
     COMMIT_COUNT=0
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         "$GATEWAY" append "$line" >/dev/null
         COMMIT_COUNT=$((COMMIT_COUNT + 1))
     done < "$NEW_FILE"
-    
+
     echo -e "${GREEN}✅ 已提交 $COMMIT_COUNT 首${NC}"
 fi
 
