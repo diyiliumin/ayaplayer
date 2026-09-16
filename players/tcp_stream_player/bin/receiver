@@ -2,17 +2,12 @@
 
 set -e
 
-# 输出目录
 OUT_DIR="${OUT_DIR:-/tmp/ts_stream}"
 mkdir -p "$OUT_DIR"
-
-# 清理旧文件
 rm -f "$OUT_DIR"/*.ts
 
-# 时间戳前缀（防止覆盖）
 PREFIX=$(date +%s)
 
-# ★★★ 按时间分片，每 2 秒一个文件 ★★★
 exec ffmpeg \
     -hide_banner -loglevel error \
     -re \
@@ -21,10 +16,9 @@ exec ffmpeg \
     -f segment \
     -segment_time 2 \
     -segment_format mpegts \
-    -reset_timestamps 1 \
-    -strftime 1 \
-    "$OUT_DIR/%s.ts"
-
+    -segment_format_options "mpegts_copyts=1" \
+    -reset_timestamps 0 \
+    "$OUT_DIR/${PREFIX}_%05d.ts"
 
 # set -e
 #

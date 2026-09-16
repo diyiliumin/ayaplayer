@@ -1,4 +1,4 @@
-https://ayaplayer.ymodatabase.top/inputserver/
 local
+https://ayaplayer.ymodatabase.top/inputserver/
 http://0.0.0.0:10722
 https://ymodatabase.top/stream_input
