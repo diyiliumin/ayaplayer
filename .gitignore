@@ -3,7 +3,7 @@
 *.dll
 *.so
 *.dylib
-
+./players/tcp_stream_player/source_list.txt
 ./showoff
 # Go
 tui
