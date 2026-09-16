@@ -26,89 +26,127 @@ fi
 echo "📡 数据源: $SOURCE"
 
 # ============================================
-# 本地模式：监控 TS 目录，喂给 Go 服务
+# ★★★ 初始化：清空临时目录 ★★★
+# ============================================
+echo "🧹 清空临时目录: $TS_DIR"
+rm -rf "$TS_DIR"
+mkdir -p "$TS_DIR"
+
+# ============================================
+# 本地模式
 # ============================================
 if [ "$SOURCE" = "local" ]; then
     echo "🏠 本地模式"
     echo "   TS 目录: $TS_DIR"
     echo "   URL:     http://localhost:10723"
+    echo ""
 
-    mkdir -p "$TS_DIR"
-
-    # 创建 FIFO，Go 服务从这里读
+    # 创建 FIFO
     rm -f "$FIFO"
     mkfifo "$FIFO"
 
-    # ★★★ 监控 TS 目录，新分片就写入 FIFO ★★★
+    # 保持写端（防止 FIFO 读端 open 阻塞）
     (
-        # 记录已处理的文件
-        declare -A SEEN
+        exec 3>"$FIFO"
+        while true; do sleep 3600; done
+    ) &
+    HOLDER_PID=$!
 
-        # 先处理已存在的文件
+    # ★★★ 监控 TS 目录，读一个删一个 ★★★
+    (
+        # 等第一个分片
+        echo "⏳ 等待第一个分片..." >&2
+        while [ -z "$(ls -A "$TS_DIR"/*.ts 2>/dev/null)" ]; do
+            sleep 0.5
+        done
+        echo "✅ 检测到分片，开始监控" >&2
+
+        # 处理已存在的
         for f in "$TS_DIR"/*.ts; do
             [ -f "$f" ] || continue
-            echo "📤 初始分片: $f" >&2
-            cat "$f" > "$FIFO"
-            SEEN["$f"]=1
+            echo "📤 初始分片: $(basename "$f")" >&2
+            cat "$f" > "$FIFO" 2>/dev/null || true
+            rm -f "$f"
         done
 
         # 监控新文件
         inotifywait -m -e close_write --format '%w%f' "$TS_DIR" 2>/dev/null | \
         while read -r file; do
             [[ "$file" != *.ts ]] && continue
-            [[ -n "${SEEN[$file]}" ]] && continue
-            SEEN["$file"]=1
+            [ -f "$file" ] || continue
 
-            echo "📤 新分片: $file" >&2
-            cat "$file" > "$FIFO"
+            echo "📤 新分片: $(basename "$file")" >&2
+            cat "$file" > "$FIFO" 2>/dev/null || true
+            rm -f "$file"
         done
     ) &
     TS_FEEDER_PID=$!
 
     cleanup() {
-        kill "$TS_FEEDER_PID" 2>/dev/null || true
+        kill "$HOLDER_PID" "$TS_FEEDER_PID" 2>/dev/null || true
         rm -f "$FIFO"
     }
     trap cleanup EXIT
 
-    echo ""
     echo "🚀 启动 Go 服务..."
+    echo ""
 
     # Go 服务从 FIFO 读
     exec "$BIN" -listen :10723 -type video/mp2t < "$FIFO"
 fi
 
 # ============================================
-# 远程模式：监控 TS 目录，逐个上传
+# 远程模式
 # ============================================
 if [[ "$SOURCE" == http://* ]] || [[ "$SOURCE" == https://* ]]; then
     echo "🌐 远程模式"
     echo "   目标: $SOURCE"
     echo "   TS 目录: $TS_DIR"
-
-    mkdir -p "$TS_DIR"
-
-    URL="${SOURCE%/}/segment"
-
-    echo "   推送: $URL"
     echo ""
 
-    # ★★★ 监控 TS 目录，逐个上传 ★★★
+    URL="${SOURCE%/}/segment"
+    echo "   推送: $URL"
+
+    # ★★★ 等第一个分片 ★★★
+    echo "⏳ 等待第一个分片..."
+    while [ -z "$(ls -A "$TS_DIR"/*.ts 2>/dev/null)" ]; do
+        sleep 0.5
+    done
+    echo "✅ 检测到分片，开始上传"
+    echo ""
+
+    # 先处理已存在的
+    for f in "$TS_DIR"/*.ts; do
+        [ -f "$f" ] || continue
+        echo "📤 初始上传: $(basename "$f")" >&2
+
+        if curl --http1.1 -s -X POST \
+            -H "Content-Type: video/mp2t" \
+            --data-binary "@$f" \
+            "$URL" \
+            -o /dev/null -w "  → HTTP %{http_code} (%{size_upload} bytes)\n" >&2; then
+            rm -f "$f"
+        fi
+    done
+
+    echo "👀 监控新分片..."
+    echo ""
+
+    # 监控新文件
     inotifywait -m -e close_write --format '%w%f' "$TS_DIR" 2>/dev/null | \
     while read -r file; do
         [[ "$file" != *.ts ]] && continue
+        [ -f "$file" ] || continue
 
         echo "📤 上传: $(basename "$file")" >&2
 
-        # 单个分片单独 POST
-        curl --http1.1 -s -X POST \
+        if curl --http1.1 -s -X POST \
             -H "Content-Type: video/mp2t" \
             --data-binary "@$file" \
             "$URL" \
-            -o /dev/null -w "  → HTTP %{http_code} (%{size_upload} bytes)\n" >&2
-
-        # 可选：上传后删除
-        # rm -f "$file"
+            -o /dev/null -w "  → HTTP %{http_code} (%{size_upload} bytes)\n" >&2; then
+            rm -f "$file"
+        fi
     done
 
     exit 0
@@ -118,4 +156,5 @@ fi
 # 未知格式
 # ============================================
 echo "❌ 未知数据源格式: $SOURCE" >&2
+echo "   支持: local | http://... | https://..." >&2
 exit 1
