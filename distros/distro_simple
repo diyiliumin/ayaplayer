@@ -4,4 +4,4 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ln -sfn "$SCRIPT_DIR/../players/ffplay/" "$SCRIPT_DIR/../players/default"
 $SCRIPT_DIR/../kernel/head &
 KERNEL_PID=$!
-$SCRIPT_DIR/../user_interfaces/default/bin/*
+$SCRIPT_DIR/../user_interfaces/fakehexwithascii/bin/fakehexwithascii.py
