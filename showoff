@@ -8,6 +8,7 @@ tree -L 5 > $OUTPUT_FILE
 # 配置列表（目录和文件）
 CONFIGS=(
 	"./LICENSE"
+	# "./README.md"
 	"./launch"
 	"./kernel/head"
 	"./kernel/lib/listen_control.py"
