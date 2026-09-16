@@ -3,9 +3,9 @@
 *.dll
 *.so
 *.dylib
-./players/tcp_stream_player/source_list.txt
-./to_be_played/playlist.json
-./showoff
+players/tcp_stream_player/source_list.txt
+to_be_played/playlist.json
+showoff
 # Go
 tui
 bili_select_song_tui/cmd/tui/tui
