@@ -23,7 +23,7 @@ exec ffmpeg \
     -segment_format mpegts \
     -reset_timestamps 1 \
     -strftime 1 \
-    "$OUT_DIR/%s_%N.ts"
+    "$OUT_DIR/%s.ts"
 
 
 # set -e
