@@ -1,4 +1,5 @@
 file:///home/ayazumi/aaaworkplace/biliCLI/to_be_played/playlist.json
+file://../playlist.json
 https://playlist.ymodatabase.top
 file://../to_be_played/loop_list/example.json
 http://localhost:10721
