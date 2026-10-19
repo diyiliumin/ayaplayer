@@ -8,6 +8,9 @@ to_be_played/playlist.json
 showoff
 # Go
 tui
+!tui/
+/bili_select_song_tui/cmd/tui/tui
+song_adders/*/bin/tui
 bili_select_song_tui/cmd/tui/tui
 song_adders/shared/bili_select_song_tui/cmd/tui/tui
 song_adders/*/bin/tui

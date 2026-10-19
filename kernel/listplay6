@@ -95,7 +95,11 @@ find_and_play() {
 
 	player_bin=$(echo "$PLAYER_DIR"/bin/*)
 	# "$provider" --getrawdata "$json" 2>&1 | "${player_bin[0]}" >/dev/null 2>&1 &
-	setsid bash -c "'$provider' --getrawdata '$json' 2>&1 | '${player_bin[0]}' >/dev/null 2>&1" < /dev/null > /dev/null 2>&1 &
+	# setsid bash -c "'$provider' --getrawdata '$json' 2>&1 | '${player_bin[0]}' >/dev/null 2>&1" < /dev/null > /dev/null 2>&1 &
+	JSON="$json" PROVIDER="$provider" PLAYER="${player_bin[0]}" \
+setsid bash -c '
+    "$PROVIDER" --getrawdata "$JSON" 2>/dev/null | "$PLAYER" >/dev/null 2>&1
+' < /dev/null > /dev/null 2>&1 &
 	PLAY_PID=$! #just get player, cut output, input over
 	PLAY_PID=$(ps -o pgid= -p "$PLAY_PID" | tr -d ' ')
 	# 检查 PID 是否有效
